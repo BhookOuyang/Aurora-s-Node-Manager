@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Aurora's Node Manager",
     "author": "BhookOuyang",
-    "version": (1, 0, 0),
-    "blender": (3, 6, 0),
+    "version": (1, 2, 0),
+    "blender": (3, 0, 0),
     "location": "Node Editor > Sidebar > Dear.Aurora",
     "description": "Implement node JSON serialization for storage and sharing.",
     "category": "Node",
