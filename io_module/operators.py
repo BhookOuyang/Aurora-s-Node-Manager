@@ -128,14 +128,23 @@ class NODE_OT_load_pattern(bpy.types.Operator):
         ],
         default='AUTO',
     )
-    skip_unsupported: bpy.props.BoolProperty(
-        name="Skip Unsupported Nodes",
-        description="Skip nodes that cannot be loaded instead of creating placeholders",
-        default=False,
+    create_placeholders: bpy.props.BoolProperty(
+        name="Create Placeholders",
+        description="Create [MISSING] reroute placeholders for unsupported nodes",
+        default=True,
+        update=lambda self, ctx: (
+            setattr(self, 'remove_orphan_islands', False),
+            setattr(self, 'trim_reroute_chains', False),
+        ) if self.create_placeholders else None,
     )
-    remove_reroutes: bpy.props.BoolProperty(
-        name="Remove Placeholder Reroutes",
-        description="Remove [MISSING] reroute nodes after loading",
+    remove_orphan_islands: bpy.props.BoolProperty(
+        name="Remove Orphan Islands",
+        description="Remove orphan nodes, empty frames, and reroute-only chains",
+        default=True,
+    )
+    trim_reroute_chains: bpy.props.BoolProperty(
+        name="Trim",
+        description="Trim dangling reroute chains that connect to a real node on only one side",
         default=True,
     )
     ignore_version: bpy.props.BoolProperty(
@@ -209,14 +218,20 @@ class NODE_OT_load_pattern(bpy.types.Operator):
         base_name = main_filepath.stem
 
         deserializer = PatternDeserializer()
-        deserializer.skip_unsupported = self.skip_unsupported
+        deserializer.skip_unsupported = not self.create_placeholders
         created_nodes = deserializer.deserialize(pattern_data, node_tree, pattern_dir, base_name)
 
-        # Remove placeholder reroutes if requested
-        if self.remove_reroutes:
-            removed = self._remove_placeholder_reroutes(node_tree)
+        # Trim dangling reroute chains if requested
+        if self.trim_reroute_chains:
+            trimmed = self._trim_reroute_chains(node_tree)
+            if trimmed > 0:
+                self.report({'INFO'}, f"Trimmed {trimmed} dangling reroute chains")
+
+        # Remove orphan [MISSING] reroutes if requested
+        if self.remove_orphan_islands:
+            removed = self._remove_orphan_islands(node_tree)
             if removed > 0:
-                self.report({'INFO'}, f"Removed {removed} placeholder reroutes")
+                self.report({'INFO'}, f"Removed {removed} orphan islands")
 
         # Report cross-type mappings
         if deserializer.mapped_nodes:
@@ -231,22 +246,153 @@ class NODE_OT_load_pattern(bpy.types.Operator):
         self.report({'INFO'}, f"Loaded {len(created_nodes)} nodes")
         return {'FINISHED'}
 
-    def _remove_placeholder_reroutes(self, node_tree):
-        """Remove reroute nodes that were created as placeholders for unsupported nodes."""
-        removed = 0
-        to_remove = []
-        for node in node_tree.nodes:
-            if node.bl_idname == "NodeReroute" and node.label.startswith("[MISSING]"):
-                to_remove.append(node)
+    def _remove_orphan_islands(self, node_tree):
+        """Remove orphan nodes, empty frames, and reroute-only chains.
 
+        Handles:
+        1. Nodes with no links at all (orphan nodes)
+        2. Empty frames (frames with no children)
+        3. [MISSING] reroute placeholders with no connections
+        4. Reroute-only chains (reroutes that do not connect to any real node)
+        """
+        to_remove = set()
+
+        # Phase 1: collect all nodes that participate in any link
+        linked_nodes = set()
+        for link in node_tree.links:
+            linked_nodes.add(link.from_node)
+            linked_nodes.add(link.to_node)
+
+        # Phase 2: orphan non-frame nodes with no links at all
+        for node in node_tree.nodes:
+            if node.bl_idname == "NodeFrame":
+                continue
+            if node not in linked_nodes:
+                to_remove.add(node)
+
+        # Phase 3: reroute-only chains
+        # Build adjacency for reroute nodes
+        reroute_nodes = {
+            n for n in node_tree.nodes
+            if n.bl_idname == "NodeReroute" and n not in to_remove
+        }
+        reroute_adj = {n: set() for n in reroute_nodes}
+        reroute_to_real = {n: set() for n in reroute_nodes}
+
+        for link in node_tree.links:
+            fn, tn = link.from_node, link.to_node
+            if fn in reroute_adj and tn in reroute_adj:
+                reroute_adj[fn].add(tn)
+                reroute_adj[tn].add(fn)
+            elif fn in reroute_adj:
+                reroute_to_real[fn].add(tn)
+            elif tn in reroute_adj:
+                reroute_to_real[tn].add(fn)
+
+        visited = set()
+        for reroute in reroute_nodes:
+            if reroute in visited:
+                continue
+            component = set()
+            stack = [reroute]
+            has_real = False
+            while stack:
+                current = stack.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                component.add(current)
+                if reroute_to_real.get(current):
+                    has_real = True
+                for neighbor in reroute_adj.get(current, set()):
+                    if neighbor not in visited:
+                        stack.append(neighbor)
+            if not has_real:
+                to_remove.update(component)
+
+        # Phase 4: empty frames (handle nesting via iterative pass)
+        changed = True
+        while changed:
+            changed = False
+            for node in node_tree.nodes:
+                if node.bl_idname == "NodeFrame" and node not in to_remove:
+                    has_children = any(
+                        other.parent == node
+                        for other in node_tree.nodes
+                        if other != node and other not in to_remove
+                    )
+                    if not has_children:
+                        to_remove.add(node)
+                        changed = True
+
+        # Phase 5: execute removal
+        removed = 0
         for node in to_remove:
-            # Check if this reroute has any connections
-            has_connections = any(link.from_node == node or link.to_node == node for link in node_tree.links)
-            if not has_connections:
+            try:
                 node_tree.nodes.remove(node)
                 removed += 1
+            except Exception:
+                pass
 
         return removed
+
+    def _trim_reroute_chains(self, node_tree):
+        """Trim dangling reroute chain segments.
+
+        Iteratively prunes reroute nodes with fewer than 2 connections
+        (reroute neighbors + real node neighbors). This handles branches:
+        only the dangling dead-end branch gets removed.
+        """
+        reroutes = {n for n in node_tree.nodes if n.bl_idname == "NodeReroute"}
+        if not reroutes:
+            return 0
+
+        adj = {n: set() for n in reroutes}
+        real_conn = {n: set() for n in reroutes}
+
+        for link in node_tree.links:
+            a, b = link.from_node, link.to_node
+            if a in adj and b in adj:
+                adj[a].add(b)
+                adj[b].add(a)
+            elif a in adj:
+                real_conn[a].add(b)
+            elif b in adj:
+                real_conn[b].add(a)
+
+        to_remove = set()
+
+        changed = True
+        while changed:
+            changed = False
+            for node in reroutes:
+                if node in to_remove:
+                    continue
+                rr = [n for n in adj.get(node, set()) if n not in to_remove]
+                rl = real_conn.get(node, set())
+                if len(rr) + len(rl) < 2:
+                    to_remove.add(node)
+                    changed = True
+
+        links_to_remove = [
+            l for l in node_tree.links
+            if l.from_node in to_remove or l.to_node in to_remove
+        ]
+        for link in links_to_remove:
+            try:
+                node_tree.links.remove(link)
+            except Exception:
+                pass
+
+        trimmed = 0
+        for node in to_remove:
+            try:
+                node_tree.nodes.remove(node)
+                trimmed += 1
+            except Exception:
+                pass
+
+        return trimmed
 
     def draw(self, context):
         layout = self.layout
@@ -261,12 +407,11 @@ class NODE_OT_load_pattern(bpy.types.Operator):
             box.prop(self, "ignore_version")
             layout.separator()
         layout.prop(self, "force_type")
-        layout.prop(self, "skip_unsupported")
-        row = layout.row()
-        row.enabled = not self.skip_unsupported
-        row.prop(self, "remove_reroutes")
-        if self.skip_unsupported:
-            layout.label(text="No placeholder reroutes will be created", icon='INFO')
+        layout.prop(self, "create_placeholders")
+        col = layout.column()
+        col.enabled = not self.create_placeholders
+        col.prop(self, "remove_orphan_islands")
+        col.prop(self, "trim_reroute_chains")
 
     def invoke(self, context, event):
         self._check_version(context)

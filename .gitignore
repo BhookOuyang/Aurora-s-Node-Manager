@@ -11,3 +11,6 @@ __pycache__/
 # Editor / OS
 .DS_Store
 Thumbs.db
+
+# JSON
+*.json

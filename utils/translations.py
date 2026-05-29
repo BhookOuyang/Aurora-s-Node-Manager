@@ -98,12 +98,21 @@ translations_dict = {
 
         # Load operator properties
         ("rna_label", "Target Type"): "目标类型",
-        ("rna_label", "Skip Unsupported Nodes"): "跳过不支持的节点",
-        ("rna_label", "Remove Placeholder Reroutes"): "移除占位转节点",
+        ("rna_label", "Auto"): "自动",
+        ("rna_label", "Create Placeholders"): "生成占位符",
+        ("rna_label", "Remove Orphan Islands"): "删除孤岛",
+        ("rna_label", "Trim"): "修剪",
 
         ("rna_description", "Force load into different node tree type"): "强制加载到不同的节点树类型",
-        ("rna_description", "Skip nodes that cannot be loaded instead of creating placeholders"): "跳过无法加载的节点而非创建占位符",
-        ("rna_description", "Remove [MISSING] reroute nodes after loading"): "加载后移除 [MISSING] 转节点",
+        ("rna_description", "Create [MISSING] reroute placeholders for unsupported nodes"): "为不支持的节点创建 [MISSING] 占位转节点",
+        ("rna_description", "Remove orphan nodes, empty frames, and reroute-only chains"): "移除孤立节点、空框架和纯转节点链",
+        ("rna_description", "Trim dangling reroute chains that connect to a real node on only one side"): "修剪一端连真实节点、另一端悬空的转节点链",
+
+        ("*", "Auto"): "自动",
+        ("*", "Use pattern's original type"): "使用模式的原始类型",
+        ("*", "Load as shader nodes"): "作为着色器节点加载",
+        ("*", "Load as compositor nodes"): "作为合成器节点加载",
+        ("*", "Load as geometry nodes"): "作为几何节点加载",
 
         # Pattern info properties
         ("rna_label", "Node Count"): "节点数",
