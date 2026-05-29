@@ -1,0 +1,179 @@
+{
+  "format_version": "2.0.0",
+  "meta": {
+    "name": "my_pattern",
+    "description": "",
+    "author": "",
+    "version": "1.0.0",
+    "created": "2026-05-29T19:34:57.521638",
+    "blender_version": [
+      5,
+      1,
+      1
+    ],
+    "node_tree_type": "GeometryNodeTree",
+    "is_subgroup": false,
+    "tags": [],
+    "locale": ""
+  },
+  "nodes": [
+    {
+      "uuid": "1f875fde-825d-4a75-be52-065b1fc67cb7",
+      "bl_idname": "NodeGroupInput",
+      "label": "",
+      "location": [
+        -340.0,
+        0.0
+      ],
+      "dimensions": [
+        140.0,
+        100.0
+      ],
+      "mute": false,
+      "hide": false,
+      "properties": {
+        "warning_propagation": {
+          "type": "enum",
+          "value": "ALL",
+          "enum_items": [
+            "ALL",
+            "ERRORS_AND_WARNINGS",
+            "ERRORS",
+            "NONE"
+          ],
+          "enum_descriptions": {
+            "ALL": "Propagate every info, error, and warning message upstream",
+            "ERRORS_AND_WARNINGS": "Propagate only error and warning messages upstream",
+            "ERRORS": "Propagate only error messages upstream",
+            "NONE": "Do not propagate any messages upstream"
+          }
+        },
+        "bl_width_max": {
+          "type": "float",
+          "value": 400.0
+        },
+        "bl_height_min": {
+          "type": "float",
+          "value": 30.0
+        },
+        "bl_height_max": {
+          "type": "float",
+          "value": 30.0
+        }
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "identifier": "Socket_0",
+          "type": "NodeSocketGeometry",
+          "name": "几何数据",
+          "index": 0
+        },
+        {
+          "identifier": "__extend__",
+          "type": "NodeSocketVirtual",
+          "name": "",
+          "index": 1
+        }
+      ]
+    },
+    {
+      "uuid": "7e05d6cf-6e45-4689-9493-a4ad54653f78",
+      "bl_idname": "NodeGroupOutput",
+      "label": "",
+      "location": [
+        200.0,
+        0.0
+      ],
+      "dimensions": [
+        140.0,
+        100.0
+      ],
+      "mute": false,
+      "hide": false,
+      "properties": {
+        "warning_propagation": {
+          "type": "enum",
+          "value": "ALL",
+          "enum_items": [
+            "ALL",
+            "ERRORS_AND_WARNINGS",
+            "ERRORS",
+            "NONE"
+          ],
+          "enum_descriptions": {
+            "ALL": "Propagate every info, error, and warning message upstream",
+            "ERRORS_AND_WARNINGS": "Propagate only error and warning messages upstream",
+            "ERRORS": "Propagate only error messages upstream",
+            "NONE": "Do not propagate any messages upstream"
+          }
+        },
+        "bl_width_max": {
+          "type": "float",
+          "value": 400.0
+        },
+        "bl_height_min": {
+          "type": "float",
+          "value": 30.0
+        },
+        "bl_height_max": {
+          "type": "float",
+          "value": 30.0
+        }
+      },
+      "inputs": [
+        {
+          "identifier": "Socket_1",
+          "type": "NodeSocketGeometry",
+          "is_linked": true,
+          "name": "几何数据",
+          "index": 0
+        },
+        {
+          "identifier": "__extend__",
+          "type": "NodeSocketVirtual",
+          "is_linked": false,
+          "name": "",
+          "index": 1
+        }
+      ],
+      "outputs": []
+    }
+  ],
+  "links": [
+    {
+      "from_uuid": "1f875fde-825d-4a75-be52-065b1fc67cb7",
+      "from_socket_id": "Socket_0",
+      "from_socket_name": "几何数据",
+      "from_socket_index": 0,
+      "to_uuid": "7e05d6cf-6e45-4689-9493-a4ad54653f78",
+      "to_socket_id": "Socket_1",
+      "to_socket_name": "几何数据",
+      "to_socket_index": 0
+    }
+  ],
+  "interface": {
+    "inputs": [
+      {
+        "name": "几何数据",
+        "identifier": "Socket_0",
+        "in_out": "INPUT",
+        "type": "NodeSocketGeometry",
+        "hide_value": false,
+        "hide_in_modifier": false,
+        "force_non_field": false
+      }
+    ],
+    "outputs": [
+      {
+        "name": "几何数据",
+        "identifier": "Socket_1",
+        "in_out": "OUTPUT",
+        "type": "NodeSocketGeometry",
+        "hide_value": false,
+        "hide_in_modifier": false,
+        "force_non_field": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,396 @@
+{
+  "format_version": "2.0.0",
+  "meta": {
+    "name": "w",
+    "description": "",
+    "author": "",
+    "version": "1.0.0",
+    "created": "2026-05-29T19:38:33.033807",
+    "blender_version": [
+      5,
+      1,
+      1
+    ],
+    "node_tree_type": "ShaderNodeTree",
+    "is_subgroup": false,
+    "tags": [],
+    "locale": ""
+  },
+  "nodes": [
+    {
+      "uuid": "5005f54d-d965-464f-99c9-5074a9d969ac",
+      "bl_idname": "ShaderNodeBsdfPrincipled",
+      "label": "",
+      "location": [
+        -200.0,
+        100.0
+      ],
+      "dimensions": [
+        240.0,
+        100.0
+      ],
+      "mute": false,
+      "hide": false,
+      "properties": {
+        "warning_propagation": {
+          "type": "enum",
+          "value": "ALL",
+          "enum_items": [
+            "ALL",
+            "ERRORS_AND_WARNINGS",
+            "ERRORS",
+            "NONE"
+          ],
+          "enum_descriptions": {
+            "ALL": "Propagate every info, error, and warning message upstream",
+            "ERRORS_AND_WARNINGS": "Propagate only error and warning messages upstream",
+            "ERRORS": "Propagate only error messages upstream",
+            "NONE": "Do not propagate any messages upstream"
+          }
+        },
+        "bl_width_max": {
+          "type": "float",
+          "value": 700.0
+        },
+        "bl_height_min": {
+          "type": "float",
+          "value": 30.0
+        },
+        "bl_height_max": {
+          "type": "float",
+          "value": 30.0
+        },
+        "distribution": {
+          "type": "enum",
+          "value": "MULTI_GGX",
+          "enum_items": [
+            "GGX",
+            "MULTI_GGX"
+          ],
+          "enum_descriptions": {
+            "GGX": "",
+            "MULTI_GGX": "GGX with additional correction to account for multiple scattering, preserve energy and prevent unexpected darkening at high roughness"
+          }
+        },
+        "subsurface_method": {
+          "type": "enum",
+          "value": "RANDOM_WALK",
+          "enum_items": [
+            "BURLEY",
+            "RANDOM_WALK",
+            "RANDOM_WALK_SKIN"
+          ],
+          "enum_descriptions": {
+            "BURLEY": "Approximation to physically based volume scattering",
+            "RANDOM_WALK": "Volumetric approximation to physically based volume scattering, using the scattering radius as specified",
+            "RANDOM_WALK_SKIN": "Volumetric approximation to physically based volume scattering, with scattering radius automatically adjusted to match color textures. Designed for skin shading."
+          }
+        }
+      },
+      "inputs": [
+        {
+          "identifier": "Base Color",
+          "type": "NodeSocketColor",
+          "is_linked": false,
+          "name": "Base Color",
+          "index": 0,
+          "default_value": [
+            0.800000011920929,
+            0.800000011920929,
+            0.800000011920929,
+            1.0
+          ]
+        },
+        {
+          "identifier": "Metallic",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Metallic",
+          "index": 1,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Roughness",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Roughness",
+          "index": 2,
+          "default_value": 0.5
+        },
+        {
+          "identifier": "IOR",
+          "type": "NodeSocketFloat",
+          "is_linked": false,
+          "name": "IOR",
+          "index": 3,
+          "default_value": 1.5
+        },
+        {
+          "identifier": "Alpha",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Alpha",
+          "index": 4,
+          "default_value": 1.0
+        },
+        {
+          "identifier": "Normal",
+          "type": "NodeSocketVector",
+          "is_linked": false,
+          "name": "Normal",
+          "index": 5,
+          "default_value": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "identifier": "Weight",
+          "type": "NodeSocketFloat",
+          "is_linked": false,
+          "name": "Weight",
+          "index": 6,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Diffuse Roughness",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Diffuse Roughness",
+          "index": 7,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Subsurface Weight",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Subsurface Weight",
+          "index": 8,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Subsurface Radius",
+          "type": "NodeSocketVector",
+          "is_linked": false,
+          "name": "Subsurface Radius",
+          "index": 9,
+          "default_value": [
+            1.0,
+            0.20000000298023224,
+            0.10000000149011612
+          ]
+        },
+        {
+          "identifier": "Subsurface Scale",
+          "type": "NodeSocketFloatDistance",
+          "is_linked": false,
+          "name": "Subsurface Scale",
+          "index": 10,
+          "default_value": 0.05000000074505806
+        },
+        {
+          "identifier": "Subsurface IOR",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Subsurface IOR",
+          "index": 11,
+          "default_value": 1.399999976158142
+        },
+        {
+          "identifier": "Subsurface Anisotropy",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Subsurface Anisotropy",
+          "index": 12,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Specular IOR Level",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Specular IOR Level",
+          "index": 13,
+          "default_value": 0.5
+        },
+        {
+          "identifier": "Specular Tint",
+          "type": "NodeSocketColor",
+          "is_linked": false,
+          "name": "Specular Tint",
+          "index": 14,
+          "default_value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "identifier": "Anisotropic",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Anisotropic",
+          "index": 15,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Anisotropic Rotation",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Anisotropic Rotation",
+          "index": 16,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Tangent",
+          "type": "NodeSocketVector",
+          "is_linked": false,
+          "name": "Tangent",
+          "index": 17,
+          "default_value": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "identifier": "Transmission Weight",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Transmission Weight",
+          "index": 18,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Coat Weight",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Coat Weight",
+          "index": 19,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Coat Roughness",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Coat Roughness",
+          "index": 20,
+          "default_value": 0.029999999329447746
+        },
+        {
+          "identifier": "Coat IOR",
+          "type": "NodeSocketFloat",
+          "is_linked": false,
+          "name": "Coat IOR",
+          "index": 21,
+          "default_value": 1.5
+        },
+        {
+          "identifier": "Coat Tint",
+          "type": "NodeSocketColor",
+          "is_linked": false,
+          "name": "Coat Tint",
+          "index": 22,
+          "default_value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "identifier": "Coat Normal",
+          "type": "NodeSocketVector",
+          "is_linked": false,
+          "name": "Coat Normal",
+          "index": 23,
+          "default_value": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "identifier": "Sheen Weight",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Sheen Weight",
+          "index": 24,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Sheen Roughness",
+          "type": "NodeSocketFloatFactor",
+          "is_linked": false,
+          "name": "Sheen Roughness",
+          "index": 25,
+          "default_value": 0.5
+        },
+        {
+          "identifier": "Sheen Tint",
+          "type": "NodeSocketColor",
+          "is_linked": false,
+          "name": "Sheen Tint",
+          "index": 26,
+          "default_value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "identifier": "Emission Color",
+          "type": "NodeSocketColor",
+          "is_linked": false,
+          "name": "Emission Color",
+          "index": 27,
+          "default_value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "identifier": "Emission Strength",
+          "type": "NodeSocketFloat",
+          "is_linked": false,
+          "name": "Emission Strength",
+          "index": 28,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Thin Film Thickness",
+          "type": "NodeSocketFloatWavelength",
+          "is_linked": false,
+          "name": "Thin Film Thickness",
+          "index": 29,
+          "default_value": 0.0
+        },
+        {
+          "identifier": "Thin Film IOR",
+          "type": "NodeSocketFloat",
+          "is_linked": false,
+          "name": "Thin Film IOR",
+          "index": 30,
+          "default_value": 1.3300000429153442
+        }
+      ],
+      "outputs": [
+        {
+          "identifier": "BSDF",
+          "type": "NodeSocketShader",
+          "name": "BSDF",
+          "index": 0
+        }
+      ]
+    }
+  ],
+  "links": [],
+  "interface": {
+    "inputs": [],
+    "outputs": []
+  }
+}
