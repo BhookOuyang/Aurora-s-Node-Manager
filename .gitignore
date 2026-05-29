@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Cache
+.cache/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
