@@ -21,6 +21,8 @@ class PatternDeserializer:
         self._pattern_dir: Optional[Path] = None
         self._base_name: Optional[str] = None
         self.skip_unsupported: bool = False
+        self._source_path: str = ""
+        self.on_warning = None
 
     def deserialize(self, data: Dict[str, Any], node_tree: bpy.types.NodeTree,
                     pattern_dir: Path = None, base_name: str = None) -> List[bpy.types.Node]:
@@ -190,7 +192,7 @@ class PatternDeserializer:
             if not socket_data.get("is_linked", False) and "default_value" in socket_data:
                 socket = self._find_socket(new_node, socket_data, is_input=True)
                 if socket:
-                    set_socket_value_safe(socket, socket_data["default_value"])
+                    set_socket_value_safe(socket, socket_data["default_value"], source_file=self._source_path or self._base_name or "", on_warning=self.on_warning)
 
         # Special handling
         special = node_info.get("special", {})
@@ -238,7 +240,7 @@ class PatternDeserializer:
             if "default_value" in socket_data:
                 socket = self._find_socket(new_node, socket_data, is_input=False)
                 if socket:
-                    set_socket_value_safe(socket, socket_data["default_value"])
+                    set_socket_value_safe(socket, socket_data["default_value"], source_file=self._source_path or self._base_name or "", on_warning=self.on_warning)
 
         return new_node
 
@@ -450,6 +452,8 @@ class PatternDeserializer:
                             group_data = json.load(f)
                         new_group = bpy.data.node_groups.new(group_name, parent_tree.bl_idname)
                         sub_deserializer = PatternDeserializer()
+                        sub_deserializer._source_path = f"{self._source_path or self._base_name} -> {group_name}"
+                        sub_deserializer.on_warning = self.on_warning
                         sub_deserializer.deserialize(group_data, new_group, self._pattern_dir, self._base_name)
                         node.node_tree = new_group
                         self.group_cache[group_id] = new_group

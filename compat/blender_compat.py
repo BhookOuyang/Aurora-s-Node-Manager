@@ -167,10 +167,16 @@ def get_socket_value_safe(socket):
         return None
 
 
-def set_socket_value_safe(socket, value):
+def set_socket_value_safe(socket, value, source_file="", on_warning=None):
     """Safely set socket default value."""
     if value is None:
         return
+
+    def _warn(msg):
+        if on_warning:
+            on_warning(msg)
+        else:
+            print(msg)
 
     try:
         socket_type = get_socket_type_name(socket)
@@ -200,14 +206,12 @@ def set_socket_value_safe(socket, value):
         elif mapped == 'NodeSocketRotation':
             socket.default_value = tuple(float(v) for v in value)
         elif mapped == 'NodeSocketMatrix':
-            # Expecting 4x4 list of lists
             if isinstance(value, list) and len(value) == 4:
                 for i, row in enumerate(value):
                     for j, v in enumerate(row):
                         socket.default_value[i][j] = float(v)
         elif mapped in ('NodeSocketObject', 'NodeSocketMaterial', 'NodeSocketCollection',
                         'NodeSocketImage', 'NodeSocketTexture'):
-            # ID references - value should be name string
             if isinstance(value, str) and value:
                 data_collections = {
                     'NodeSocketObject': lambda: bpy.data.objects,
@@ -221,10 +225,24 @@ def set_socket_value_safe(socket, value):
                     collection = collection_getter()
                     if value in collection:
                         socket.default_value = collection[value]
-        # NodeSocketGeometry and NodeSocketShader have no default_value to set
+        elif mapped == 'NodeSocketMenu':
+            socket.default_value = str(value)
+        else:
+            try:
+                socket.default_value = value
+            except Exception:
+                node = socket.node
+                node_name = node.bl_idname if node else "?"
+                socket_name = getattr(socket, 'name', '?')
+                file_info = f" in '{source_file}'" if source_file else ""
+                _warn(f"[WARN] {node_name}.{socket_name}: failed to set socket value (type: {mapped}){file_info}, please check")
 
     except Exception as e:
-        print(f"[WARN] Failed to set socket value: {e}")
+        node = socket.node
+        node_name = node.bl_idname if node else "?"
+        socket_name = getattr(socket, 'name', '?')
+        file_info = f" in '{source_file}'" if source_file else ""
+        _warn(f"[WARN] {node_name}.{socket_name}: failed to set socket value{file_info}: {e}")
 
 def get_socket_by_index(node: bpy.types.Node, index: int, is_input: bool) -> Optional[bpy.types.NodeSocket]:
     """Get socket by index with bounds checking."""

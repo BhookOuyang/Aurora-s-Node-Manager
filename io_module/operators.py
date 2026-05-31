@@ -1,5 +1,6 @@
 """Blender operators for AuroraSNodeManager."""
 import json
+import re
 import shutil
 import zipfile
 import tempfile
@@ -131,7 +132,7 @@ class NODE_OT_load_pattern(bpy.types.Operator):
     create_placeholders: bpy.props.BoolProperty(
         name="Create Placeholders",
         description="Create [MISSING] reroute placeholders for unsupported nodes",
-        default=True,
+        default=False,
         update=lambda self, ctx: (
             setattr(self, 'remove_orphan_islands', False),
             setattr(self, 'trim_reroute_chains', False),
@@ -140,12 +141,12 @@ class NODE_OT_load_pattern(bpy.types.Operator):
     remove_orphan_islands: bpy.props.BoolProperty(
         name="Remove Orphan Islands",
         description="Remove orphan nodes, empty frames, and reroute-only chains",
-        default=True,
+        default=False,
     )
     trim_reroute_chains: bpy.props.BoolProperty(
         name="Trim",
         description="Trim dangling reroute chains that connect to a real node on only one side",
-        default=True,
+        default=False,
     )
     ignore_version: bpy.props.BoolProperty(
         name="Ignore Version Mismatch",
@@ -219,6 +220,8 @@ class NODE_OT_load_pattern(bpy.types.Operator):
 
         deserializer = PatternDeserializer()
         deserializer.skip_unsupported = not self.create_placeholders
+        warning_messages = []
+        deserializer.on_warning = lambda msg: warning_messages.append(msg)
         created_nodes = deserializer.deserialize(pattern_data, node_tree, pattern_dir, base_name)
 
         # Trim dangling reroute chains if requested
@@ -243,7 +246,31 @@ class NODE_OT_load_pattern(bpy.types.Operator):
             unique_missing = set(deserializer.missing_nodes)
             self.report({'WARNING'}, f"Skipped {len(deserializer.missing_nodes)} unsupported nodes: {', '.join(unique_missing)}")
 
-        self.report({'INFO'}, f"Loaded {len(created_nodes)} nodes")
+        if warning_messages:
+            data = {}
+            for m in warning_messages:
+                if m.startswith("[WARN] ") and "." in m:
+                    key = m[7:].split(".")[0]
+                else:
+                    key = "Unknown"
+                entry = data.setdefault(key, {"count": 0})
+                entry["count"] += 1
+            parts = []
+            for node_type, info in sorted(data.items()):
+                parts.append(f"{info['count']} socket(s) had value errors in '{node_type}'")
+
+            def draw_popup(self, ctx):
+                layout = self.layout
+                layout.label(text=f"Loaded {len(created_nodes)} nodes", icon='INFO')
+                layout.separator()
+                for part in parts:
+                    layout.label(text=part, icon='ERROR')
+                layout.label(text="Please check the affected nodes")
+
+            context.window_manager.popup_menu(draw_popup, title="Load Warnings", icon='ERROR')
+            self.report({'WARNING'}, f"Loaded {len(created_nodes)} nodes, {len(data)} node type(s) had errors")
+        else:
+            self.report({'INFO'}, f"Loaded {len(created_nodes)} nodes")
         return {'FINISHED'}
 
     def _remove_orphan_islands(self, node_tree):
@@ -415,6 +442,19 @@ class NODE_OT_load_pattern(bpy.types.Operator):
 
     def invoke(self, context, event):
         self._check_version(context)
+        self.create_placeholders = False
+        if self.file_name:
+            main_filepath = get_patterns_dir() / self.file_name
+            if main_filepath.exists():
+                try:
+                    with open(main_filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    pattern_tree_type = data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
+                    current_tree_type = context.space_data.node_tree.bl_idname
+                    if pattern_tree_type != current_tree_type:
+                        self.create_placeholders = True
+                except Exception:
+                    pass
         return context.window_manager.invoke_props_dialog(self)
 
 
