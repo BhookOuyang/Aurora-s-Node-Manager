@@ -1,6 +1,11 @@
-"""Special handling for Zone nodes (Simulation, Repeat, Bake)."""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
+"""Special handling for Zone nodes (Simulation, Repeat, Bake).
+There are still some bugs here that will be fixed in future versions"""
 import bpy
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
+from ..utils import logger
 
 
 class ZoneHandler:
@@ -86,7 +91,7 @@ class ZoneHandler:
             try:
                 new_node = node_tree.nodes.new(type=bl_idname)
             except Exception as e:
-                print(f"[ERROR] Failed to create zone node {bl_idname}: {e}")
+                logger.error(f"Failed to create zone node {bl_idname}: {e}")
                 return None
 
         zone_data = node_info.get("special", {}).get("zone", {})
@@ -109,7 +114,7 @@ class ZoneHandler:
                         name=item_data.get("name", "Item"),
                     )
                 except Exception as e:
-                    print(f"[WARN] Failed to restore state item: {e}")
+                    logger.warning(f"Failed to restore state item: {e}")
 
         for n in list(internal_tree.nodes):
             internal_tree.nodes.remove(n)

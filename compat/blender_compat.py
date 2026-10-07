@@ -1,6 +1,39 @@
-"""Blender 3.x / 4.x / 5.x API compatibility layer."""
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
+"""Blender 3.6+ / 4.x / 5.x API compatibility layer."""
 import bpy
+import struct
 from typing import Optional
+from ..utils import logger
+
+
+def f32_short(v):
+    """Return a float whose repr round-trips to the same float32 as ``v``.
+
+    Blender stores node/socket/color/coordinate data as float32, but reading
+    it into Python yields a float64 whose JSON repr is verbose (e.g.
+    ``0.800000011920929``). This finds the shortest decimal that parses back
+    to the identical float32 (``0.8``). Values that are not exactly
+    representable as float32 (double-backed) are returned unchanged, so the
+    conversion is strictly lossless.
+    """
+    if not isinstance(v, float):
+        return v
+    try:
+        t = struct.unpack('f', struct.pack('f', v))[0]
+    except (OverflowError, struct.error):
+        return v
+    if t != v:
+        return v  # needs float64 precision; leave untouched
+    for k in range(10):
+        s = repr(round(v, k))
+        try:
+            if struct.unpack('f', struct.pack('f', float(s)))[0] == t:
+                return float(s)
+        except (OverflowError, struct.error):
+            continue
+    return v
 
 # Socket type mapping (3.x legacy -> 4.x+ standard)
 SOCKET_TYPE_MAP = {
@@ -123,7 +156,7 @@ def get_socket_value_safe(socket):
                       'NodeSocketFloatWavelength', 'NodeSocketFloatColorTemperature',
                       'NodeSocketFloatFrequency', 'NodeSocketFloatMass',
                       'NodeSocketFloatTimeAbsolute'):
-            return float(value)
+            return f32_short(float(value))
         elif mapped == 'NodeSocketInt':
             return int(value)
         elif mapped in ('NodeSocketBool',):
@@ -133,16 +166,16 @@ def get_socket_value_safe(socket):
                          'NodeSocketVectorEuler', 'NodeSocketVectorFactor',
                          'NodeSocketVectorPercentage', 'NodeSocketVectorTranslation',
                          'NodeSocketVectorVelocity', 'NodeSocketVectorXYZ'):
-            return [float(v) for v in value]
+            return [f32_short(float(v)) for v in value]
         elif mapped == 'NodeSocketColor':
-            return [float(v) for v in value]
+            return [f32_short(float(v)) for v in value]
         elif mapped == 'NodeSocketString':
             return str(value)
         elif mapped == 'NodeSocketRotation':
-            return [float(v) for v in value]
+            return [f32_short(float(v)) for v in value]
         elif mapped == 'NodeSocketMatrix':
             # Matrix is 4x4, flatten to 16 elements
-            return [[float(row[i]) for i in range(4)] for row in value]
+            return [[f32_short(float(row[i])) for i in range(4)] for row in value]
         elif mapped == 'NodeSocketObject':
             return value.name if value else ""
         elif mapped == 'NodeSocketMaterial':
@@ -163,7 +196,8 @@ def get_socket_value_safe(socket):
                 return list(value)
             return value
     except Exception as e:
-        print(f"[WARN] Failed to read socket value: {e}")
+        from ..utils import logger
+        logger.warning(f"Failed to read socket value: {e}")
         return None
 
 
@@ -176,7 +210,8 @@ def set_socket_value_safe(socket, value, source_file="", on_warning=None):
         if on_warning:
             on_warning(msg)
         else:
-            print(msg)
+            from ..utils import logger
+            logger.warning(msg)
 
     try:
         socket_type = get_socket_type_name(socket)
@@ -232,14 +267,14 @@ def set_socket_value_safe(socket, value, source_file="", on_warning=None):
                 socket.default_value = value
             except Exception:
                 node = socket.node
-                node_name = node.bl_idname if node else "?"
+                node_name = f"{node.bl_idname}({node.name})" if node else "?"
                 socket_name = getattr(socket, 'name', '?')
                 file_info = f" in '{source_file}'" if source_file else ""
                 _warn(f"[WARN] {node_name}.{socket_name}: failed to set socket value (type: {mapped}){file_info}, please check")
 
     except Exception as e:
         node = socket.node
-        node_name = node.bl_idname if node else "?"
+        node_name = f"{node.bl_idname}({node.name})" if node else "?"
         socket_name = getattr(socket, 'name', '?')
         file_info = f" in '{source_file}'" if source_file else ""
         _warn(f"[WARN] {node_name}.{socket_name}: failed to set socket value{file_info}: {e}")

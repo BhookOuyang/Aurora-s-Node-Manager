@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
 """Blender UI panel definitions for AuroraSNodeManager."""
 import hashlib
 import json
@@ -6,16 +9,39 @@ from pathlib import Path
 import bpy
 
 from ..utils.file_utils import get_patterns_dir, get_cached_items
+from ..utils.translations import tr
+from ..core import transport
 
 
 class NodePatternItem(bpy.types.PropertyGroup):
     """Item in the pattern list."""
-    name: bpy.props.StringProperty(name="Name")
-    file_name: bpy.props.StringProperty(name="File Name")
-    is_locked: bpy.props.BoolProperty(name="Locked", default=False)
-    node_count: bpy.props.IntProperty(name="Node Count", default=0)
-    has_groups: bpy.props.BoolProperty(name="Has Groups", default=False)
-    node_type: bpy.props.StringProperty(name="Node Type")
+    name: bpy.props.StringProperty(
+        name="Name",
+        description="Name of the pattern as shown in the list",
+    )
+    file_name: bpy.props.StringProperty(
+        name="File Name",
+        description="Relative path of the pattern file in the storage directory",
+    )
+    is_locked: bpy.props.BoolProperty(
+        name="Locked",
+        description="Whether the pattern is locked against overwriting",
+        default=False,
+    )
+    node_count: bpy.props.IntProperty(
+        name="Node Count",
+        description="Number of nodes in the pattern",
+        default=0,
+    )
+    has_groups: bpy.props.BoolProperty(
+        name="Has Groups",
+        description="Whether the pattern contains node groups",
+        default=False,
+    )
+    node_type: bpy.props.StringProperty(
+        name="Node Type",
+        description="Type of the node tree the pattern was saved from",
+    )
 
 
 class NodePatternInfo(bpy.types.PropertyGroup):
@@ -30,9 +56,19 @@ class NodePatternInfo(bpy.types.PropertyGroup):
     format_version: bpy.props.StringProperty(name="Format Version")
 
 
+class LogEntryItem(bpy.types.PropertyGroup):
+    """Checkable entry in the log export dialog."""
+    name: bpy.props.StringProperty(name="Name")
+    path: bpy.props.StringProperty(name="Path")
+    file_size: bpy.props.IntProperty(name="Size", default=0)
+    entry_count: bpy.props.IntProperty(name="Entry Count", default=0)
+    enabled: bpy.props.BoolProperty(name="Export", default=True)
+
+
 class NODE_UL_pattern_list(bpy.types.UIList):
     """Pattern list UI."""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
+        self.use_filter_show = True
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
 
@@ -121,7 +157,7 @@ class NODE_PT_pattern_panel(bpy.types.Panel):
 
         box = layout.box()
         row = box.row()
-        row.label(text=f"{type_name} Patterns", icon=icon)
+        row.label(text=tr(type_name + " Patterns"), icon=icon)
         row.label(text=f"({len(wm.node_pattern_items)})")
 
         if len(wm.node_pattern_items) > 0:
@@ -146,12 +182,14 @@ class NODE_PT_pattern_panel(bpy.types.Panel):
                 row = box.row(align=True)
 
                 op = row.operator("node.load_pattern_v2", text="Load", icon='IMPORT')
-                op.file_name = actual_item.file_name
+                if op is not None:
+                    op.file_name = actual_item.file_name
 
                 sub = row.row(align=True)
                 sub.enabled = not actual_item.is_locked
                 op = sub.operator("node.overwrite_pattern_v2", text="Overwrite", icon='FILE_REFRESH')
-                op.file_name = actual_item.file_name
+                if op is not None:
+                    op.file_name = actual_item.file_name
 
                 row = box.row(align=True)
                 row.operator("node.copy_pattern_v2", text="Copy", icon='COPYDOWN')
@@ -160,17 +198,20 @@ class NODE_PT_pattern_panel(bpy.types.Panel):
                     op = row.operator("node.toggle_lock_pattern_v2", text="Unlock", icon='LOCKED')
                 else:
                     op = row.operator("node.toggle_lock_pattern_v2", text="Lock", icon='UNLOCKED')
-                op.file_name = actual_item.file_name
+                if op is not None:
+                    op.file_name = actual_item.file_name
 
                 sub = row.row(align=True)
                 sub.enabled = not actual_item.is_locked
                 op = sub.operator("node.edit_pattern_info_v2", text="Edit", icon='GREASEPENCIL')
-                op.file_name = actual_item.file_name
+                if op is not None:
+                    op.file_name = actual_item.file_name
 
                 sub = row.row(align=True)
                 sub.enabled = not actual_item.is_locked
                 op = sub.operator("node.delete_pattern_v2", text="Delete", icon='TRASH')
-                op.file_name = actual_item.file_name
+                if op is not None:
+                    op.file_name = actual_item.file_name
         else:
             box.label(text="No patterns in this category", icon='INFO')
 
@@ -198,6 +239,117 @@ class NODE_PT_pattern_panel(bpy.types.Panel):
             refresh_pattern_list(wm)
 
 
+class NODE_PT_shard_send_panel(bpy.types.Panel):
+    """Shard transfer panel (sender side)."""
+    bl_label = "Send Shards"
+    bl_idname = "NODE_PT_shard_send_v2"
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "Dear.Aurora"
+    bl_parent_id = "NODE_PT_pattern_panel_v2"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        session = transport.send_session()
+        return (session is not None
+                and len(session["copied"]) < len(session["chunks"]))
+
+    def draw(self, context):
+        layout = self.layout
+        session = transport.send_session()
+        if not session:
+            layout.label(text=tr("No active shard session"), icon='INFO')
+            return
+        chunks = session["chunks"]
+        copied = session["copied"]
+        m = len(chunks)
+        layout.label(text=tr("Shard Transfer · Copied {}/{}").format(len(copied), m), icon='COPYDOWN')
+        layout.separator()
+        for idx, chunk in enumerate(chunks):
+            row = layout.row(align=True)
+            row.label(text=tr("Shard {}/{}").format(chunk['n'], chunk['m']))
+            if idx in copied:
+                row.label(text=tr("Copied"), icon='CHECKMARK')
+            else:
+                row.label(text=tr("Not copied"), icon='BLANK1')
+            op = row.operator("node.copy_shard_v2", text="Copy", icon='COPYDOWN')
+            op.shard_index = idx
+        layout.separator()
+        layout.operator("node.reset_shard_session_v2", text="Clear Session", icon='TRASH')
+
+
+class NODE_PT_shard_receiver_panel(bpy.types.Panel):
+    """Shard receiving panel with a color-block progress matrix.
+
+    Shows the password UI once an encrypted batch has been fully collected.
+    """
+    bl_label = "Receive Shards"
+    bl_idname = "NODE_PT_shard_receiver_v2"
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "Dear.Aurora"
+    bl_parent_id = "NODE_PT_pattern_panel_v2"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return transport.has_receiver_ui()
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        phase = transport.receiver_phase()
+        token = transport.receiver_token()
+        st = transport.collector.status(token) if token else None
+
+        if phase == "decrypt":
+            layout.label(text=tr("All shards received ({}), enter password to decrypt").format(st['m'] if st else ''), icon='LOCKED')
+            layout.prop(wm, "aurora_decrypt_password")
+            layout.operator_context = 'EXEC_DEFAULT'
+            layout.operator("node.decrypt_paste_v2", text="Decrypt & Paste", icon='PASTEDOWN')
+            layout.separator()
+            layout.operator("node.reset_receiver_session_v2", text="Clear Session", icon='TRASH')
+            return
+
+        if not st or st["m"] == 0:
+            layout.label(text=tr("No shard session"), icon='INFO')
+            return
+        if st["complete"]:
+            layout.label(text=tr("All shards received, processing…"), icon='CHECKMARK')
+            return
+
+        layout.scale_y = 1.3
+        layout.operator("node.paste_next_shard_v2", text="Paste Next Shard", icon='PASTEDOWN')
+
+        layout.separator()
+        row = layout.row()
+        row.label(text=tr("Received {}/{}").format(st['received'], st['m']))
+        if st["encrypted"]:
+            row.label(text=tr("This batch is encrypted"), icon='LOCKED')
+
+        received = set(st["indices"])
+        cols = 10
+        max_rows = 5
+        max_n = min(st["m"], cols * max_rows)
+        rows = min(max_rows, (max_n + cols - 1) // cols)
+
+        for r in range(rows):
+            cells = []
+            for c in range(cols):
+                n = r * cols + c + 1
+                if n > max_n:
+                    break
+                cells.append("■" if n in received else "▢")
+            layout.label(text="  ".join(cells))
+
+        if st["m"] > cols * max_rows:
+            layout.label(text=tr("Too many shards, showing first {}").format(cols * max_rows), icon='INFO')
+
+        layout.separator()
+        layout.operator("node.reset_receiver_session_v2", text="Clear Session", icon='TRASH')
+
+
 class NODE_PT_pattern_info_panel(bpy.types.Panel):
     """Pattern metadata panel."""
     bl_label = "Pattern Info"
@@ -223,7 +375,7 @@ class NODE_PT_pattern_info_panel(bpy.types.Panel):
         icon, type_name = _get_type_icon(info.node_type)
         row = col.row()
         row.label(text="Type:")
-        row.label(text=type_name or "-", icon=icon)
+        row.label(text=tr(type_name) or "-", icon=icon)
 
         col.separator()
 
@@ -273,12 +425,26 @@ class NODE_PT_advanced_panel(bpy.types.Panel):
 
         if prefs and hasattr(prefs, 'preferences'):
             prefs_data = prefs.preferences
+
+            box = layout.box()
+            row = box.row()
+            row.label(text=tr("Clipboard transfer options"), icon='EXPORT')
+            box.prop(prefs_data, "use_sharding")
+            if prefs_data.use_sharding:
+                box.prop(prefs_data, "shard_size_preset")
+            box.prop(prefs_data, "use_encryption")
+            if prefs_data.use_encryption:
+                box.prop(prefs_data, "encryption_password")
+            box.prop(prefs_data, "only_modified")
+
             layout.prop(prefs_data, "show_advanced")
 
             if prefs_data.show_advanced:
                 layout.label(text="Nothing here yet", icon='INFO')
                 layout.label(text="check back next version~ (◕‿◕✿)")
 
+                # The answer is hidden in plain sight.
+                # You're welcome to inspect the code, but I'd rather you discovered it yourself.
                 if hashlib.sha256(prefs_data.patterns_path.encode()).hexdigest() == "343a717e010922d4cbe116fc4b5315524403a93d9ff8cc03b66a0b3c25fdfcc0":
                     box = layout.box()
                     box.label(text="✨ Experimental Features")
@@ -428,25 +594,51 @@ def refresh_pattern_list(wm):
 classes = [
     NodePatternItem,
     NodePatternInfo,
+    LogEntryItem,
     NODE_UL_pattern_list,
     NODE_PT_pattern_panel,
+    NODE_PT_shard_send_panel,
+    NODE_PT_shard_receiver_panel,
     NODE_PT_pattern_info_panel,
     NODE_PT_recovery_panel,
     NODE_PT_advanced_panel,
 ]
 
 
+def _del_wm(attr):
+    try:
+        delattr(bpy.types.WindowManager, attr)
+    except Exception:
+        pass
+
+
 def register():
     for cls in classes:
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
         bpy.utils.register_class(cls)
 
+    _del_wm("node_pattern_items")
     bpy.types.WindowManager.node_pattern_items = bpy.props.CollectionProperty(type=NodePatternItem)
+    _del_wm("node_pattern_active_index")
     bpy.types.WindowManager.node_pattern_active_index = bpy.props.IntProperty(
+        name="Active Index",
         default=-1,
         update=_on_active_index_change
     )
+    _del_wm("node_pattern_info")
     bpy.types.WindowManager.node_pattern_info = bpy.props.PointerProperty(type=NodePatternInfo)
 
+    _del_wm("aurora_decrypt_password")
+    bpy.types.WindowManager.aurora_decrypt_password = bpy.props.StringProperty(
+        name="Decrypt Password",
+        subtype='PASSWORD',
+        default="",
+    )
+
+    _del_wm("node_pattern_category")
     bpy.types.WindowManager.node_pattern_category = bpy.props.EnumProperty(
         name="Category",
         items=[
@@ -458,12 +650,20 @@ def register():
         update=lambda self, context: refresh_pattern_list(context.window_manager)
     )
 
+    _del_wm("aurora_log_entries")
+    bpy.types.WindowManager.aurora_log_entries = bpy.props.CollectionProperty(type=LogEntryItem)
+
 
 def unregister():
-    del bpy.types.WindowManager.node_pattern_category
-    del bpy.types.WindowManager.node_pattern_info
-    del bpy.types.WindowManager.node_pattern_active_index
-    del bpy.types.WindowManager.node_pattern_items
+    _del_wm("node_pattern_category")
+    _del_wm("node_pattern_info")
+    _del_wm("node_pattern_active_index")
+    _del_wm("node_pattern_items")
+    _del_wm("aurora_decrypt_password")
+    _del_wm("aurora_log_entries")
 
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

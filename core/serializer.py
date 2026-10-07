@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
 """Core serialization engine for node patterns."""
 import uuid
 import bpy
@@ -5,10 +8,12 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from ..compat.blender_compat import get_socket_value_safe, map_socket_type, get_socket_index
+from ..compat.blender_compat import get_socket_value_safe, map_socket_type, get_socket_index, f32_short
+from ..utils.file_utils import get_addon_preferences
 from .topology import NodeTopology
 from .properties_db import NodePropertiesDB
 from .zone_handler import ZoneHandler
+from ..utils import logger
 
 
 class PatternSerializer:
@@ -27,11 +32,16 @@ class PatternSerializer:
 
         # 1. Generate stable UUIDs for each node
         node_uuids = {}
+        used_uuids = set()
         for node in nodes:
             existing_uuid = node.get("_aurora_uuid", None)
-            if not existing_uuid:
+            if existing_uuid and existing_uuid in used_uuids:
                 existing_uuid = str(uuid.uuid4())
                 node["_aurora_uuid"] = existing_uuid
+            elif not existing_uuid:
+                existing_uuid = str(uuid.uuid4())
+                node["_aurora_uuid"] = existing_uuid
+            used_uuids.add(existing_uuid)
             node_uuids[node] = existing_uuid
 
         # 2. Collect links (only within selected set)
@@ -60,9 +70,10 @@ class PatternSerializer:
         sorted_actual = [uuid_to_node[n["uuid"]] for n in sorted_nodes if n["uuid"] in uuid_to_node]
 
         # 4. Serialize each node
+        only_modified = meta.get("only_modified", False) if meta else False
         nodes_data = []
         for node in sorted_actual:
-            node_data = self._serialize_node(node, node_uuids)
+            node_data = self._serialize_node(node, node_uuids, only_modified=only_modified)
             nodes_data.append(node_data)
 
         # 5. Serialize interface (for node groups)
@@ -82,6 +93,7 @@ class PatternSerializer:
                 "is_subgroup": meta.get("is_subgroup", False) if meta else False,
                 "tags": meta.get("tags", []) if meta else [],
                 "locale": meta.get("locale", "") if meta else "",
+                "platform": bpy.app.build_platform,
             },
             "nodes": nodes_data,
             "links": links_data,
@@ -90,7 +102,8 @@ class PatternSerializer:
 
         return result
 
-    def _serialize_node(self, node: bpy.types.Node, node_uuids: Dict[bpy.types.Node, str]) -> Dict[str, Any]:
+    def _serialize_node(self, node: bpy.types.Node, node_uuids: Dict[bpy.types.Node, str],
+                     only_modified: bool = False) -> Dict[str, Any]:
         """Serialize a single node."""
         data = {
             "uuid": node_uuids[node],
@@ -103,7 +116,7 @@ class PatternSerializer:
         }
 
         # Properties
-        data["properties"] = NodePropertiesDB.discover_properties(node)
+        data["properties"] = NodePropertiesDB.discover_properties(node, only_modified=only_modified)
 
         # Input sockets (only unlinked with default values)
         data["inputs"] = []
@@ -122,7 +135,7 @@ class PatternSerializer:
                     if val is not None:
                         socket_data["default_value"] = val
                 except Exception as e:
-                    print(f"[WARN] Failed to read socket default: {e}")
+                    logger.warning(f"Failed to read socket default: {e}")
 
             data["inputs"].append(socket_data)
 
@@ -141,7 +154,7 @@ class PatternSerializer:
                     if val is not None:
                         socket_data["default_value"] = val
                 except Exception as e:
-                    print(f"[WARN] Failed to read output socket default: {e}")
+                    logger.warning(f"Failed to read output socket default: {e}")
             data["outputs"].append(socket_data)
 
         # Special handling
@@ -171,6 +184,13 @@ class PatternSerializer:
         if hasattr(node, 'material') and node.material:
             special["material"] = node.material.name
 
+        # Local file references (images, clips, scripts, IES, etc.)
+        prefs = get_addon_preferences()
+        if getattr(prefs, 'store_absolute_paths', False):
+            file_paths = self._collect_file_paths(node)
+            if file_paths:
+                special["file_paths"] = file_paths
+
         # Capture Attribute items (Blender 5.x multi-attribute capture)
         if node.bl_idname == "GeometryNodeCaptureAttribute" and hasattr(node, 'capture_items'):
             capture_items_data = []
@@ -195,6 +215,42 @@ class PatternSerializer:
             data["special"] = special
 
         return data
+
+    # Node block attributes that hold ID datablocks with a '.filepath'.
+    _ID_ATTR_FILEPATH = ('image', 'clip', 'sound', 'texture', 'script', 'ies')
+
+    def _collect_file_paths(self, node) -> Dict[str, Any]:
+        """Collect absolute paths of files referenced by a node."""
+        import os
+        paths = {}
+
+        # ID datablocks referenced by a dedicated attribute (e.g. node.image).
+        for attr in self._ID_ATTR_FILEPATH:
+            try:
+                obj = getattr(node, attr, None)
+                if obj is None or not hasattr(obj, 'filepath'):
+                    continue
+                fp = obj.filepath
+                if not fp:
+                    continue
+                abs_path = bpy.path.abspath(fp)
+                if abs_path:
+                    paths[attr] = abs_path
+            except Exception as e:
+                logger.warning(f"Failed to read {node.bl_idname}.{attr}: {e}")
+
+        # Script / IES nodes in 'external' mode keep their path in node.filepath.
+        try:
+            if hasattr(node, 'filepath'):
+                fp = node.filepath
+                if fp:
+                    abs_path = bpy.path.abspath(fp)
+                    if abs_path and os.path.exists(abs_path):
+                        paths.setdefault("filepath", abs_path)
+        except Exception as e:
+            logger.warning(f"Failed to read {node.bl_idname}.filepath: {e}")
+
+        return paths
 
     def _serialize_color_ramp(self, node) -> Dict[str, Any]:
         """Serialize color ramp data."""
@@ -317,9 +373,9 @@ class PatternSerializer:
                         pass
 
                 if hasattr(item, 'min_value'):
-                    socket_info["min_value"] = item.min_value
+                    socket_info["min_value"] = f32_short(item.min_value)
                 if hasattr(item, 'max_value'):
-                    socket_info["max_value"] = item.max_value
+                    socket_info["max_value"] = f32_short(item.max_value)
                 if hasattr(item, 'description') and item.description:
                     socket_info["description"] = item.description
                 if hasattr(item, 'hide_value'):

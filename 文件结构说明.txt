@@ -1,0 +1,65 @@
+aurora_s_node_manager 文件结构说明（Python 文件）
+=================================================
+
+aurora_s_node_manager/
+├── __init__.py          # 插件入口：bl_info 元信息；偏好设置 NodeManagerAddonPreferences
+│                        #   （自定义存储路径/自动迁移/高级选项/绝对路径存储）；
+│                        #   register()/unregister() 注册调度；退出时清理撤销缓存
+│
+├── core/                # 核心引擎（序列化 / 反序列化）
+│   ├── __init__.py      # 空注册桩（register/unregister 占位）
+│   ├── serializer.py    # PatternSerializer —— 序列化引擎：
+│   │                    #   分配稳定 UUID、收集选中节点间连线、Kahn 拓扑排序、
+│   │                    #   序列化节点 RNA 属性/插槽默认值/节点组接口/嵌套节点组、
+│   │                    #   收集引用的本地文件绝对路径
+│   ├── deserializer.py  # PatternDeserializer —— 反序列化引擎：
+│   │                    #   分阶段创建 Frame 与非 Frame 节点、按 index→identifier→name→type
+│   │                    #   优先匹配插槽建连线、还原节点组接口与嵌套节点组、还原 Zone、
+│   │                    #   缺失节点生成 [MISSING] Reroute 占位、跨树类型映射、文件路径恢复、
+│   │                    #   版本降级时的 capture socket 兜底（Frame 包裹）
+│   ├── rna_inspector.py # RNAInspector —— RNA 属性发现与序列化/应用引擎：
+│   │                    #   黑名单过滤核心内部属性、按节点加载优先级排序解决依赖、
+│   │                    #   枚举跨版本降级匹配、ColorRamp/曲线映射/指针/数组/矩阵序列化与还原
+│   ├── topology.py      # NodeTopology —— Kahn 算法拓扑排序、依赖分析（含环检测与兜底）
+│   ├── properties_db.py # [已废弃] NodePropertiesDB —— 旧版属性库，仅委托给
+│   │                    #   RNAInspector（保留以兼容 v2.0 模式）
+│   └── zone_handler.py  # ZoneHandler —— Zone 节点（Simulation/Repeat/Bake）的
+│                        #   内部节点树序列化与还原、状态项/烘焙项处理
+│
+├── compat/              # Blender API 兼容层
+│   ├── __init__.py      # 空注册桩
+│   ├── blender_compat.py# 插槽类型映射（3.x 旧类型 → 4.x+ 标准）、插槽默认值安全读写、
+│   │                    #   插槽索引获取/按索引取插槽工具
+│   └── node_mappings.py # 节点跨版本重命名映射 + 跨节点树类型映射
+│                        #   （Shader ↔ Geometry ↔ Compositor）
+│
+├── io_module/           # 操作符层
+│   ├── __init__.py      # 注册/注销 operators
+│   └── operators.py     # 14 个操作符：
+│                        #   save_pattern_v2 保存 / load_pattern_v2 加载 / delete_pattern_v2 删除 /
+│                        #   edit_pattern_info_v2 编辑元数据 / overwrite_pattern_v2 覆盖 /
+│                        #   toggle_lock_pattern_v2 锁定 / restore_pattern_v2 恢复 /
+│                        #   undo_last_cache_v2 撤销上一步 / migrate_patterns_v2 迁移路径 /
+│                        #   export_pattern_v2 ZIP导出 / import_pattern_v2 ZIP导入 /
+│                        #   copy_pattern_v2 剪贴板复制 / paste_pattern_v2 剪贴板粘贴 /
+│                        #   inspect_node_rna RNA检查器；
+│                        #   含孤立节点清理与悬空 Reroute 链修剪算法、版本差异拦截
+│
+├── ui/                  # 界面层
+│   ├── __init__.py      # 注册/注销 panels
+│   └── panels.py        # 面板与列表：主面板（保存/导出/导入/粘贴/分类/模式列表/操作按钮）、
+│                        #   信息面板、恢复面板、高级面板、UIList 列表项、
+│                        #   模式列表文件系统同步与刷新、选中项元数据展示
+│
+└── utils/               # 工具层
+    ├── __init__.py      # 空注册桩
+    ├── file_utils.py    # 文件工具：模式存储路径解析、缓存/恢复(撤销)、文件名清洗与去重、
+    │                    #   剪贴板数据校验（单模式/带组 Bundle 两种格式）、
+    │                    #   ZIP Bundle 导入导出、分享时剥离本地绝对路径
+    └── translations.py  # 中文字典（UI 与偏好设置的界面翻译）
+
+其余非 Python 内容（简要）：
+- io/            空占位包（__init__.py 为空，暂未使用）
+- patterns/      模式存储目录（运行时数据）：shader/ compositor/ geometry/ 下为
+                 生成的 .json 模式文件，.cache/ 为删除/覆盖前的撤销缓存
+- README.md / README.en.md / LICENSE / .gitignore  文档、许可证与 Git 忽略规则

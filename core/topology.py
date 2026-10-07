@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
 """Topology sorting and dependency analysis for node patterns."""
 from collections import defaultdict, deque
 from typing import List, Dict, Set, Any

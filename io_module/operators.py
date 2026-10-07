@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
 """Blender operators for AuroraSNodeManager."""
 import json
 import re
@@ -10,11 +13,73 @@ import bpy
 
 from ..core.serializer import PatternSerializer
 from ..core.deserializer import PatternDeserializer
+from ..core import transport
+from ..utils import logger
+from ..utils.translations import tr
 from ..utils.file_utils import (
     sanitize_filename, get_patterns_dir, get_unique_filename, AuroraJSONEncoder,
     TYPE_SUBDIR_MAP, ADDON_ROOT, validate_clipboard_data, CLIPBOARD_BUNDLE_KEY,
-    move_to_cache, restore_from_cache, get_cached_items, clear_cache
+    move_to_cache, restore_from_cache, get_cached_items, clear_cache,
+    strip_local_paths, get_addon_preferences,
+    inject_resource_paths, scan_resources, extract_resources,
+    validate_json_paths,
 )
+
+
+_CONTEXT_KEYS = (
+    "window_manager", "window", "screen", "workspace",
+    "area", "region", "space_data", "scene",
+)
+
+
+def _captured_context():
+    """Snapshot the context members needed to invoke an operator later."""
+    c = bpy.context
+    out = {}
+    for key in _CONTEXT_KEYS:
+        if hasattr(c, key):
+            value = getattr(c, key)
+            if value is not None:
+                out[key] = value
+    return out
+
+
+def _run_with_context(legacy_call, modern_call, overrides):
+    """Execute an operator under a context override, compatible with
+    Blender 3.6 through 5.x.
+
+    Blender 4.0 removed the legacy "context dict as first bpy.ops argument"
+    override, so 4.0+ uses ``Context.temp_override`` (available since 3.2),
+    while 3.6 keeps the legacy call.
+    """
+    if bpy.app.version >= (4, 0, 0):
+        with bpy.context.temp_override(**overrides):
+            return modern_call()
+    return legacy_call(overrides)
+
+
+def _schedule_dialog(bl_idname):
+    """Invoke an operator (e.g. a props dialog) after the current operator
+    finishes, avoiding nested ``bpy.ops`` popups that fail to display."""
+    overrides = _captured_context()
+
+    def _open():
+        try:
+            module, name = bl_idname.split(".")
+            op = getattr(getattr(bpy.ops, module), name)
+            _run_with_context(
+                lambda o: op(o, 'INVOKE_DEFAULT'),
+                lambda: op('INVOKE_DEFAULT'),
+                overrides,
+            )
+        except Exception as e:
+            print(f"[AURORA] Failed to open dialog ({bl_idname}): {e}")
+        return None
+
+    try:
+        bpy.app.timers.register(_open, first_interval=0.1)
+    except Exception as e:
+        print(f"[AURORA] Failed to open dialog via timer: {e}")
 
 
 def auto_refresh(func):
@@ -28,10 +93,62 @@ def auto_refresh(func):
     return wrapper
 
 
+# State handed between the import operator and the resource-confirm dialogs.
+_pending_import = None
+
+
+def _finish_import(context, main_data, groups_data):
+    """Save an imported pattern + groups and refresh the pattern list.
+
+    Returns (safe_name, pattern_name).
+    """
+    node_type = main_data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
+    subdir_name = TYPE_SUBDIR_MAP.get(node_type, 'shader')
+    patterns_root = get_patterns_dir()
+    save_dir = patterns_root / subdir_name
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    pattern_name = main_data.get("meta", {}).get("name", "imported_pattern")
+    safe_name = sanitize_filename(pattern_name)
+    safe_name = get_unique_filename(safe_name, save_dir)
+
+    main_filepath = save_dir / f"{safe_name}.json"
+    with open(main_filepath, 'w', encoding='utf-8') as f:
+        json.dump(main_data, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+
+    for gid, gdata in (groups_data or {}).items():
+        gsafe = sanitize_filename(gid)
+        gfpath = save_dir / f"{safe_name}_group_{gsafe}.json"
+        with open(gfpath, 'w', encoding='utf-8') as f:
+            json.dump(gdata, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+
+    from ..ui.panels import refresh_pattern_list
+    refresh_pattern_list(context.window_manager)
+    return safe_name, pattern_name
+
+
+def _cleanup_inner(res):
+    """Delete the temp pack file referenced by a res dict."""
+    if res and res.get("inner_path"):
+        try:
+            Path(res["inner_path"]).unlink()
+        except OSError:
+            pass
+
+
+def _cleanup_pending():
+    """Delete the pending temp pack and clear the pending import state."""
+    global _pending_import
+    if _pending_import:
+        _cleanup_inner(_pending_import.get("res"))
+    _pending_import = None
+
+
 class NODE_OT_save_pattern(bpy.types.Operator):
     """Save selected nodes as a pattern."""
     bl_idname = "node.save_pattern_v2"
     bl_label = "Save Node Pattern"
+    bl_description = "Save the selected node state as a pattern file"
     bl_options = {'REGISTER', 'UNDO'}
 
     pattern_name: bpy.props.StringProperty(name="Pattern Name", default="my_pattern")
@@ -53,12 +170,14 @@ class NODE_OT_save_pattern(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Serialize
+        prefs = get_addon_preferences()
         meta = {
             "name": self.pattern_name,
             "description": self.description,
             "author": self.author,
             "version": self.version,
             "tags": [t.strip() for t in self.tags.split(",") if t.strip()],
+            "only_modified": prefs.only_modified if prefs else False,
         }
 
         serializer = PatternSerializer()
@@ -115,6 +234,7 @@ class NODE_OT_load_pattern(bpy.types.Operator):
     """Load a pattern into the current node tree."""
     bl_idname = "node.load_pattern_v2"
     bl_label = "Load Pattern"
+    bl_description = "Load the selected pattern into the node editor"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -462,6 +582,7 @@ class NODE_OT_delete_pattern(bpy.types.Operator):
     """Delete a saved pattern."""
     bl_idname = "node.delete_pattern_v2"
     bl_label = "Delete Pattern"
+    bl_description = "Delete the selected pattern"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -489,6 +610,7 @@ class NODE_OT_edit_pattern_info(bpy.types.Operator):
     """Edit pattern metadata."""
     bl_idname = "node.edit_pattern_info_v2"
     bl_label = "Edit Pattern Info"
+    bl_description = "Edit the metadata of the selected pattern"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -565,6 +687,7 @@ class NODE_OT_overwrite_pattern(bpy.types.Operator):
     """Overwrite an existing pattern."""
     bl_idname = "node.overwrite_pattern_v2"
     bl_label = "Overwrite Pattern"
+    bl_description = "Overwrite the selected pattern with the current node state"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -715,6 +838,7 @@ class NODE_OT_toggle_lock_pattern(bpy.types.Operator):
     """Toggle pattern lock status."""
     bl_idname = "node.toggle_lock_pattern_v2"
     bl_label = "Toggle Lock Pattern"
+    bl_description = "Toggle the lock of the selected pattern"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -744,6 +868,7 @@ class NODE_OT_restore_pattern(bpy.types.Operator):
     """Restore a pattern from cache."""
     bl_idname = "node.restore_pattern_v2"
     bl_label = "Restore Pattern"
+    bl_description = "Restore the selected cached pattern"
     bl_options = {'REGISTER', 'UNDO'}
 
     file_name: bpy.props.StringProperty()
@@ -761,6 +886,7 @@ class NODE_OT_undo_last_cache(bpy.types.Operator):
     """Restore the most recently cached pattern."""
     bl_idname = "node.undo_last_cache_v2"
     bl_label = "Undo Last"
+    bl_description = "Undo the last overwrite/delete operation"
     bl_options = {'REGISTER', 'UNDO'}
 
     @auto_refresh
@@ -781,6 +907,7 @@ class NODE_OT_migrate_patterns(bpy.types.Operator):
     """Migrate patterns to new storage path."""
     bl_idname = "node.migrate_patterns_v2"
     bl_label = "Migrate Patterns"
+    bl_description = "Move pattern files to the new storage path"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -821,19 +948,25 @@ class NODE_OT_migrate_patterns(bpy.types.Operator):
         from ..ui.panels import refresh_pattern_list
         refresh_pattern_list(context.window_manager)
 
-        self.report({'INFO'}, f"Migrated {count} pattern files")
+        self.report({'INFO'}, tr("Migrated {} pattern files").format(count))
         return {'FINISHED'}
 
 
 class NODE_OT_export_pattern(bpy.types.Operator):
-    """Export pattern as ZIP bundle."""
+    """Export pattern as .aurpak bundle."""
     bl_idname = "node.export_pattern_v2"
     bl_label = "Export Pattern"
-    bl_description = "Export the selected pattern as a ZIP file"
+    bl_description = "Export the selected pattern as an .aurpak file"
     bl_options = {'REGISTER'}
 
-    filepath: bpy.props.StringProperty(subtype='FILE_PATH', default="pattern_export.zip")
-    filter_glob: bpy.props.StringProperty(default="*.zip", options={'HIDDEN'})
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', default="pattern_export.aurpak")
+    filter_glob: bpy.props.StringProperty(default="*.aurpak", options={'HIDDEN'})
+
+    use_pack_resources: bpy.props.BoolProperty(
+        name="Pack Resources",
+        description="Validate and pack resource files referenced by nodes (images/IES/videos/audio, etc.) into the pack; absolute paths never leak, the receiver may choose whether to keep them.",
+        default=True,
+    )
 
     def execute(self, context):
         wm = context.window_manager
@@ -863,14 +996,19 @@ class NODE_OT_export_pattern(bpy.types.Operator):
             groups_data[gid] = gdata
 
         # Export
-        zip_path = Path(self.filepath)
-        if zip_path.suffix != '.zip':
-            zip_path = zip_path.with_suffix('.zip')
+        bundle_path = Path(self.filepath)
+        if bundle_path.suffix != '.aurpak':
+            bundle_path = bundle_path.with_suffix('.aurpak')
 
         from ..utils.file_utils import export_pattern_bundle
-        export_pattern_bundle(main_data, groups_data, zip_path)
+        bundle_path, warnings = export_pattern_bundle(
+            main_data, groups_data, bundle_path,
+            use_pack_resources=self.use_pack_resources,
+        )
 
-        self.report({'INFO'}, f"Exported to {zip_path.name}")
+        for w in warnings:
+            self.report({'WARNING'}, w)
+        self.report({'INFO'}, tr("Exported to {}").format(bundle_path.name))
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -879,55 +1017,286 @@ class NODE_OT_export_pattern(bpy.types.Operator):
 
 
 class NODE_OT_import_pattern(bpy.types.Operator):
-    """Import pattern from ZIP bundle."""
+    """Import pattern from an .aurpak or .zip bundle."""
     bl_idname = "node.import_pattern_v2"
     bl_label = "Import Pattern"
-    bl_description = "Import patterns from a ZIP file"
+    bl_description = "Import patterns from an .aurpak or .zip file"
     bl_options = {'REGISTER', 'UNDO'}
 
     filepath: bpy.props.StringProperty(subtype='FILE_PATH')
-    filter_glob: bpy.props.StringProperty(default="*.zip", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.aurpak;*.zip", options={'HIDDEN'})
 
     def execute(self, context):
-        from ..utils.file_utils import import_pattern_bundle
+        global _pending_import
 
-        main_data, groups_data = import_pattern_bundle(self.filepath)
+        from ..utils.file_utils import import_pattern_bundle
+        from ..utils.translations import tr
+
+        main_data, groups_data, res = import_pattern_bundle(self.filepath)
         if not main_data:
             self.report({'ERROR'}, "Failed to import pattern")
             return {'CANCELLED'}
 
-        # Determine target directory
-        node_type = main_data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
-        subdir_name = TYPE_SUBDIR_MAP.get(node_type, 'shader')
-        patterns_root = get_patterns_dir()
-        save_dir = patterns_root / subdir_name
-        save_dir.mkdir(parents=True, exist_ok=True)
+        # Cross-platform warning
+        saved_platform = main_data.get("meta", {}).get("platform")
+        current_platform = bpy.app.build_platform
+        if saved_platform and saved_platform != current_platform:
+            def draw_popup(self, context):
+                layout = self.layout
+                layout.label(text=tr("节点组创建于 {platform}。跨平台加载时，渲染与计算效果可能存在细微差异。").format(platform=saved_platform))
+            bpy.ops.wm.popup_menu(draw_popup, title=tr("Cross-Platform Warning"), icon='INFO')
 
-        pattern_name = main_data.get("meta", {}).get("name", "imported_pattern")
-        safe_name = sanitize_filename(pattern_name)
-        safe_name = get_unique_filename(safe_name, save_dir)
+        issues, has_tokens = validate_json_paths(main_data, groups_data)
+        if issues:
+            _cleanup_inner(res)
+            shown = ", ".join(issues[:3])
+            self.report({'ERROR'},
+                        tr("JSON contains non-token paths that cannot be matched to resources ({} issue(s)): {}").format(len(issues), shown))
+            return {'CANCELLED'}
+        if has_tokens and not (res and res.get("present")):
+            _cleanup_inner(res)
+            self.report({'ERROR'}, tr("JSON contains resource tokens but the pack has no resource pack; cannot resolve references"))
+            return {'CANCELLED'}
 
-        # Save main file
-        main_filepath = save_dir / f"{safe_name}.json"
-        with open(main_filepath, 'w', encoding='utf-8') as f:
-            json.dump(main_data, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+        _pending_import = {
+            "filepath": self.filepath,
+            "main_data": main_data,
+            "groups_data": groups_data,
+            "res": res,
+        }
 
-        # Save group files
-        for gid, gdata in (groups_data or {}).items():
-            gsafe = sanitize_filename(gid)
-            gfpath = save_dir / f"{safe_name}_group_{gsafe}.json"
-            with open(gfpath, 'w', encoding='utf-8') as f:
-                json.dump(gdata, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+        if res and res["present"]:
+            _schedule_dialog("node.import_resources_keep")
+            return {'FINISHED'}
 
-        from ..ui.panels import refresh_pattern_list
-        refresh_pattern_list(context.window_manager)
+        # No pack: foreign members are tamper evidence -> drop and import.
+        if res and res.get("foreign"):
+            _pending_import = None
+            for name in res["foreign"][:10]:
+                self.report({'WARNING'}, tr("Foreign file (tamper evidence) ignored: {}").format(name))
+            safe_name, pattern_name = _finish_import(context, main_data, groups_data)
+            self.report({'INFO'}, tr("Imported pattern: {}").format(pattern_name))
+            return {'FINISHED'}
 
-        self.report({'INFO'}, f"Imported pattern: {pattern_name}")
+        _pending_import = None
+        safe_name, pattern_name = _finish_import(context, main_data, groups_data)
+        self.report({'INFO'}, tr("Imported pattern: {}").format(pattern_name))
         return {'FINISHED'}
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
+
+
+class NODE_OT_import_resources_keep(bpy.types.Operator):
+    """Ask whether to keep the resource pack attached to an .aurpak bundle."""
+    bl_idname = "node.import_resources_keep"
+    bl_label = "Keep Resource Pack?"
+    bl_options = {'REGISTER'}
+
+    keep_resources: bpy.props.BoolProperty(name="Keep Resource Pack", default=True)
+
+    def draw(self, context):
+        layout = self.layout
+        pi = _pending_import
+        res = pi["res"] if pi else None
+        count = res["file_count"] if res else 0
+        size = res["total_size"] if res else 0
+        layout.label(text=tr("This pack includes a resource pack:"))
+        layout.label(text=tr("{} resource files, {:.2f} MB total").format(count, size/1024/1024), icon='PACKAGE')
+        if res and res.get("bomb"):
+            layout.label(text=tr("Resource pack exceeds size limit: {}").format(res.get('bomb_reason') or ''), icon='ERROR')
+        if res and res.get("foreign"):
+            layout.label(text=tr("The pack contains foreign files that will be treated as tampering and deleted"), icon='ERROR')
+        layout.prop(self, "keep_resources")
+        layout.label(text=tr("Not keeping will discard the resources without checks"), icon='INFO')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=480)
+
+    def execute(self, context):
+        global _pending_import
+        pi = _pending_import
+        if not pi:
+            self.report({'ERROR'}, tr("No pending import data"))
+            return {'CANCELLED'}
+
+        if not self.keep_resources:
+            main_data = pi["main_data"]
+            strip_local_paths(main_data)
+            for gd in pi["groups_data"].values():
+                strip_local_paths(gd)
+            _cleanup_pending()
+            safe_name, pattern_name = _finish_import(context, main_data, pi["groups_data"])
+            self.report({'INFO'}, tr("Discarded resource pack, imported pattern: {}").format(pattern_name))
+            return {'FINISHED'}
+
+        # Keep -> scan (in-memory classification, nothing written to disk).
+        res = pi["res"] or {}
+        scan = {"tamper": False, "entries": [], "manifest": None}
+        if res.get("inner_path"):
+            scan = scan_resources(res["inner_path"])
+        pi["scan"] = scan
+
+        prefs = get_addon_preferences()
+        safe_mode = bool(getattr(prefs, 'safe_import', True))
+
+        auto_deleted = list(res.get("foreign") or [])
+        unexpected = []
+        dialog_tiers = set()
+        for e in scan["entries"]:
+            if not e.get("sha_valid"):
+                auto_deleted.append(e["name"])
+                continue
+            tier = e["tier"]
+            if tier == 'whitelist':
+                continue
+            if tier == 'blacklist':
+                if safe_mode:
+                    auto_deleted.append(e["name"])
+                else:
+                    unexpected.append(e)
+                    dialog_tiers.add('blacklist')
+            else:  # report / unknown type
+                unexpected.append(e)
+                dialog_tiers.add('report')
+        pi["auto_deleted"] = auto_deleted
+        pi["dialog_tiers"] = dialog_tiers
+
+        if unexpected:
+            _schedule_dialog("node.import_resources_unexpected")
+        else:
+            _schedule_dialog("node.import_resources_confirm")
+        return {'FINISHED'}
+
+
+class NODE_OT_import_resources_unexpected(bpy.types.Operator):
+    """Report unexpected resource types; user decides keep-all or delete-all."""
+    bl_idname = "node.import_resources_unexpected"
+    bl_label = "Unexpected Extra Resource Types"
+    bl_options = {'REGISTER'}
+
+    keep_all: bpy.props.BoolProperty(name="Keep these resources (keep-all)", default=False)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.alert = True
+        layout.label(text=tr("The resource pack contains unexpected extra resource types:"), icon='QUESTION')
+        pi = _pending_import
+        if pi:
+            scan = pi.get("scan") or {}
+            tiers = pi.get("dialog_tiers") or set()
+            for e in scan.get("entries", []):
+                if not e.get("sha_valid"):
+                    continue
+                if e["tier"] not in tiers:
+                    continue
+                icon = 'ERROR' if e["tier"] == 'blacklist' else 'INFO'
+                layout.label(text=f"  - {e['name']}", icon=icon)
+        layout.prop(self, "keep_all")
+        layout.label(text=tr("Not keeping will delete all of them (default)."), icon='INFO')
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def execute(self, context):
+        global _pending_import
+        pi = _pending_import
+        if not pi:
+            self.report({'ERROR'}, tr("No pending import data"))
+            return {'CANCELLED'}
+        pi["keep_unexpected"] = self.keep_all
+        _schedule_dialog("node.import_resources_confirm")
+        return {'FINISHED'}
+
+
+class NODE_OT_import_resources_confirm(bpy.types.Operator):
+    """Confirm resource storage location and extract."""
+    bl_idname = "node.import_resources_confirm"
+    bl_label = "Choose Resource Storage Location"
+    bl_options = {'REGISTER'}
+
+    extract_dir: bpy.props.StringProperty(name="Storage Location", subtype='DIR_PATH', default="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=tr("Choose where to store the resource files:"), icon='FILE_FOLDER')
+        layout.prop(self, "extract_dir")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def execute(self, context):
+        global _pending_import
+        pi = _pending_import
+        if not pi:
+            self.report({'ERROR'}, tr("No pending import data"))
+            return {'CANCELLED'}
+        if not self.extract_dir:
+            self.report({'ERROR'}, tr("Please choose a resource storage location"))
+            return {'CANCELLED'}
+
+        scan = pi.get("scan") or {}
+        manifest = scan.get("manifest")
+        res = pi.get("res") or {}
+        inner_path = res.get("inner_path")
+
+        extra_extract = set()
+        if pi.get("keep_unexpected"):
+            extra_extract = set(pi.get("dialog_tiers") or set())
+
+        extract_map = {}
+        warnings = []
+        integrity_skipped = 0
+        if inner_path:
+            extract_map, warnings, integrity_skipped = extract_resources(
+                inner_path, self.extract_dir, manifest, extra_extract=extra_extract,
+            )
+
+        if extract_map:
+            inject_resource_paths(pi["main_data"], extract_map)
+            for gd in pi["groups_data"].values():
+                inject_resource_paths(gd, extract_map)
+        else:
+            strip_local_paths(pi["main_data"])
+            for gd in pi["groups_data"].values():
+                strip_local_paths(gd)
+
+        auto_deleted = pi.get("auto_deleted") or []
+        _cleanup_pending()
+        safe_name, pattern_name = _finish_import(context, pi["main_data"], pi["groups_data"])
+        for w in warnings:
+            self.report({'WARNING'}, w)
+        for name in auto_deleted[:10]:
+            self.report({'WARNING'}, tr("Tampered/risky file deleted: {}").format(name))
+        msg = tr("Imported pattern: {} ({} resource(s) extracted)").format(pattern_name, len(extract_map))
+        if integrity_skipped:
+            msg += tr(", {} integrity-flagged file(s) deleted").format(integrity_skipped)
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+def _build_copy_payload(compact_text, use_encryption, password, use_sharding, shard_size):
+    """Apply the optional encryption/sharding layers to a compact payload.
+
+    Returns (clipboard_text, chunks, error). ``chunks`` is the shard list when
+    sharding is enabled (and ``clipboard_text`` is the serialized first chunk),
+    else None. ``error`` is set on failure.
+    """
+    payload = compact_text
+    if use_encryption:
+        if not password:
+            return None, None, tr("No encryption password set")
+        try:
+            wrapper = transport.encrypt_text(compact_text, password)
+        except ValueError as e:
+            return None, None, str(e)
+        payload = json.dumps(wrapper, separators=(",", ":"), ensure_ascii=False)
+    if use_sharding:
+        extra_first = {"encrypted": 1 if use_encryption else 0}
+        chunks = transport.shard_text(payload, shard_size, extra_first=extra_first)
+        return transport.chunk_to_text(chunks[0]), chunks, None
+    return payload, None, None
 
 
 class NODE_OT_copy_pattern(bpy.types.Operator):
@@ -937,10 +1306,27 @@ class NODE_OT_copy_pattern(bpy.types.Operator):
     bl_description = "Copy the selected pattern to clipboard as a bundle JSON"
     bl_options = {'REGISTER'}
 
+    password: bpy.props.StringProperty(
+        name="Encryption Password",
+        description="Encryption password used for this copy.",
+        subtype='PASSWORD',
+        default="",
+    )
+
     @classmethod
     def poll(cls, context):
         wm = context.window_manager
         return 0 <= wm.node_pattern_active_index < len(wm.node_pattern_items)
+
+    def invoke(self, context, event):
+        prefs = get_addon_preferences()
+        if prefs and prefs.use_encryption and not prefs.encryption_password:
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "password")
 
     def execute(self, context):
         wm = context.window_manager
@@ -970,9 +1356,90 @@ class NODE_OT_copy_pattern(bpy.types.Operator):
             gid = gdata.get("meta", {}).get("name", gf.stem)
             bundle["groups"][gid] = gdata
 
-        text = json.dumps(bundle, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
-        context.window_manager.clipboard = text
-        self.report({'INFO'}, f"Copied to clipboard: {item.name}")
+        # Strip local absolute paths before sharing via clipboard
+        strip_local_paths(main_data)
+        for gdata in bundle["groups"].values():
+            strip_local_paths(gdata)
+
+        from ..core.codec import encode as codec_encode
+        compact_text = codec_encode(bundle)
+
+        prefs = get_addon_preferences()
+        use_encryption = bool(prefs and prefs.use_encryption)
+        use_sharding = bool(prefs and prefs.use_sharding)
+        password = self.password or (prefs.encryption_password if prefs else "")
+        shard_size = int(prefs.shard_size_preset) if prefs else 2000
+        clip_text, chunks, err = _build_copy_payload(
+            compact_text, use_encryption, password, use_sharding, shard_size)
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+
+        if chunks is not None:
+            transport.open_send_session(chunks)
+            context.window_manager.clipboard = clip_text
+            transport.mark_shard_copied(0)
+            self.report({'INFO'}, tr("Shard 1/{} copied; keep copying shards from the transfer window").format(len(chunks)))
+            return {'FINISHED'}
+
+        context.window_manager.clipboard = clip_text
+        self.report({'INFO'}, tr("Copied to clipboard: {}").format(item.name))
+        return {'FINISHED'}
+
+
+class NODE_OT_copy_shard(bpy.types.Operator):
+    """Copy a single shard to the clipboard."""
+    bl_idname = "node.copy_shard_v2"
+    bl_label = "Copy Shard"
+    bl_description = "Copy a single shard to the clipboard"
+    bl_options = {'REGISTER'}
+
+    shard_index: bpy.props.IntProperty(default=0)
+
+    def execute(self, context):
+        session = transport.send_session()
+        if not session:
+            self.report({'ERROR'}, tr("No shard session"))
+            return {'CANCELLED'}
+        chunks = session["chunks"]
+        if not (0 <= self.shard_index < len(chunks)):
+            self.report({'ERROR'}, tr("Invalid shard number"))
+            return {'CANCELLED'}
+        context.window_manager.clipboard = transport.chunk_to_text(chunks[self.shard_index])
+        transport.mark_shard_copied(self.shard_index)
+        for area in context.screen.areas:
+            area.tag_redraw()
+        chunk = chunks[self.shard_index]
+        self.report({'INFO'}, tr("Copied shard {}/{}").format(chunk['n'], chunk['m']))
+        return {'FINISHED'}
+
+
+class NODE_OT_reset_shard_session(bpy.types.Operator):
+    """Clear the current send-side shard session."""
+    bl_idname = "node.reset_shard_session_v2"
+    bl_label = "Clear Shard Session"
+    bl_description = "Clear the current shard send session"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        transport.reset_send_session()
+        self.report({'INFO'}, tr("Send session cleared"))
+        return {'FINISHED'}
+
+
+class NODE_OT_reset_receiver_session(bpy.types.Operator):
+    """Clear the current receive-side shard session."""
+    bl_idname = "node.reset_receiver_session_v2"
+    bl_label = "Clear Receive Session"
+    bl_description = "Clear the current shard receive session"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        transport.collector.reset()
+        transport.clear_receiver_token()
+        transport.set_receiver_phase(None)
+        transport.clear_pending_payload()
+        self.report({'INFO'}, tr("Receive session cleared"))
         return {'FINISHED'}
 
 
@@ -980,6 +1447,7 @@ class NODE_OT_inspect_node_rna(bpy.types.Operator):
     """View full RNA properties of the selected node."""
     bl_idname = "node.inspect_node_rna"
     bl_label = "RNA Inspector"
+    bl_description = "Inspect the RNA properties of the selected node"
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -1057,6 +1525,75 @@ class NODE_OT_inspect_node_rna(bpy.types.Operator):
             box.label(text="(none)")
 
 
+def _paste_text(context, text):
+    """Persist a decoded payload (compact or plain JSON) to disk and refresh."""
+    result = validate_clipboard_data(text)
+    if not result["valid"]:
+        return {'CANCELLED'}, ({'ERROR'}, result["error"])
+
+    main_data = result["main_data"]
+    groups_data = result["groups_data"]
+
+    node_type = main_data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
+    subdir = TYPE_SUBDIR_MAP.get(node_type, 'shader')
+    patterns_root = get_patterns_dir()
+    save_dir = patterns_root / subdir
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    pattern_name = main_data.get("meta", {}).get("name", "pasted_pattern")
+    safe_name = sanitize_filename(pattern_name)
+    safe_name = get_unique_filename(safe_name, save_dir)
+
+    main_filepath = save_dir / f"{safe_name}.json"
+    with open(main_filepath, 'w', encoding='utf-8') as f:
+        json.dump(main_data, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+
+    for gid, gdata in groups_data.items():
+        gname = gdata.get("meta", {}).get("name", gid)
+        gsafe = sanitize_filename(gname)
+        gfpath = save_dir / f"{safe_name}_group_{gsafe}.json"
+        with open(gfpath, 'w', encoding='utf-8') as f:
+            json.dump(gdata, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+
+    from ..ui.panels import refresh_pattern_list
+    refresh_pattern_list(context.window_manager)
+
+    return {'FINISHED'}, ({'INFO'}, tr("Pasted pattern: {}").format(pattern_name))
+
+
+def _handle_receiver_complete(context, operator, token):
+    """Finish a receiver session: assemble all shards.
+
+    Plain payloads are pasted immediately; encrypted payloads are stashed as
+    pending and the receiver panel switches to its password UI (no nested
+    operator dialogs). Returns the operator result set.
+    """
+    try:
+        assembled = transport.collector.assemble(token)
+    except ValueError as e:
+        operator.report({'ERROR'}, str(e))
+        return {'CANCELLED'}
+    transport.collector.reset(token)
+    try:
+        data = json.loads(assembled)
+    except Exception:
+        data = None
+    if isinstance(data, dict) and transport.is_encrypted(data):
+        transport.set_pending_payload(data)
+        transport.set_receiver_phase("decrypt", encrypted=True)
+        operator.report({'INFO'}, tr("All shards received; enter the password in the transfer window to decrypt"))
+        for area in context.screen.areas:
+            area.tag_redraw()
+        return {'FINISHED'}
+    result_set, msg = _paste_text(context, assembled)
+    operator.report(msg[0], msg[1])
+    transport.set_receiver_phase(None)
+    transport.clear_receiver_token()
+    for area in context.screen.areas:
+        area.tag_redraw()
+    return result_set
+
+
 class NODE_OT_paste_pattern(bpy.types.Operator):
     """Paste pattern from clipboard."""
     bl_idname = "node.paste_pattern_v2"
@@ -1064,48 +1601,202 @@ class NODE_OT_paste_pattern(bpy.types.Operator):
     bl_description = "Import a pattern from clipboard"
     bl_options = {'REGISTER', 'UNDO'}
 
+    def invoke(self, context, event):
+        text = context.window_manager.clipboard
+        if text and text.strip():
+            try:
+                data = json.loads(text)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                if transport.is_shard(data):
+                    token = data.get("token")
+                    if not token:
+                        self.report({'ERROR'}, tr("Incomplete shard info"))
+                        return {'CANCELLED'}
+                    result = transport.collector.feed(data)
+                    if result["status"] == "conflict":
+                        self.report({'ERROR'}, result["message"])
+                        return {'CANCELLED'}
+                    if result["status"] == "invalid":
+                        self.report({'ERROR'}, result["message"])
+                        return {'CANCELLED'}
+                    transport.set_receiver_token(token)
+                    if result["status"] == "ok":
+                        self.report({'INFO'}, result["message"])
+                    if transport.collector.is_complete(token):
+                        return _handle_receiver_complete(context, self, token)
+                    return {'FINISHED'}
+                if transport.is_encrypted(data):
+                    transport.set_pending_payload(data)
+                    _schedule_dialog("node.decrypt_paste_v2")
+                    return {'FINISHED'}
+        return self.execute(context)
+
     def execute(self, context):
         text = context.window_manager.clipboard
         if not text or not text.strip():
             self.report({'ERROR'}, "Clipboard is empty")
             return {'CANCELLED'}
+        result_set, msg = _paste_text(context, text)
+        self.report(msg[0], msg[1])
+        return result_set
 
-        result = validate_clipboard_data(text)
-        if not result["valid"]:
-            self.report({'ERROR'}, result["error"])
+
+class NODE_OT_paste_next_shard(bpy.types.Operator):
+    """Read the clipboard and feed it into the current shard session."""
+    bl_idname = "node.paste_next_shard_v2"
+    bl_label = "Paste Next Shard"
+    bl_description = "Paste the next shard from the clipboard"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        token = transport.receiver_token()
+        if not token:
+            self.report({'ERROR'}, tr("No active shard session"))
             return {'CANCELLED'}
+        text = context.window_manager.clipboard
+        if not text or not text.strip():
+            self.report({'ERROR'}, tr("Clipboard is empty; copy a shard first"))
+            return {'CANCELLED'}
+        try:
+            data = json.loads(text)
+        except Exception:
+            self.report({'ERROR'}, tr("Clipboard content is not a shard"))
+            return {'CANCELLED'}
+        if not transport.is_shard(data):
+            self.report({'ERROR'}, tr("Clipboard content is not a shard"))
+            return {'CANCELLED'}
+        if data.get("token") != token:
+            self.report({'ERROR'}, tr("Shard from a different batch, ignored"))
+            return {'CANCELLED'}
+        result = transport.collector.feed(data)
+        if result["status"] in ("ok", "dup"):
+            self.report({'INFO'}, result["message"])
+        for area in context.screen.areas:
+            area.tag_redraw()
+        if transport.collector.is_complete(token):
+            return _handle_receiver_complete(context, self, token)
+        return {'FINISHED'}
 
-        main_data = result["main_data"]
-        groups_data = result["groups_data"]
 
-        # Determine target directory
-        node_type = main_data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
-        subdir = TYPE_SUBDIR_MAP.get(node_type, 'shader')
-        patterns_root = get_patterns_dir()
-        save_dir = patterns_root / subdir
-        save_dir.mkdir(parents=True, exist_ok=True)
+class NODE_OT_decrypt_paste(bpy.types.Operator):
+    """Request a password and paste decrypted clipboard data."""
+    bl_idname = "node.decrypt_paste_v2"
+    bl_label = "Enter Password to Decrypt"
+    bl_description = "Enter the password to decrypt encrypted node data in the clipboard"
+    bl_options = {'REGISTER', 'UNDO'}
 
-        pattern_name = main_data.get("meta", {}).get("name", "pasted_pattern")
-        safe_name = sanitize_filename(pattern_name)
-        safe_name = get_unique_filename(safe_name, save_dir)
+    password: bpy.props.StringProperty(name="Decrypt Password", subtype='PASSWORD', default="")
 
-        # Save main file
-        main_filepath = save_dir / f"{safe_name}.json"
-        with open(main_filepath, 'w', encoding='utf-8') as f:
-            json.dump(main_data, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
 
-        # Save group files
-        for gid, gdata in groups_data.items():
-            gname = gdata.get("meta", {}).get("name", gid)
-            gsafe = sanitize_filename(gname)
-            gfpath = save_dir / f"{safe_name}_group_{gsafe}.json"
-            with open(gfpath, 'w', encoding='utf-8') as f:
-                json.dump(gdata, f, indent=2, ensure_ascii=False, cls=AuroraJSONEncoder)
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "password")
+        layout.label(text=tr("Enter the password to decrypt node data"), icon='LOCKED')
 
-        from ..ui.panels import refresh_pattern_list
-        refresh_pattern_list(context.window_manager)
+    def execute(self, context):
+        wrapper = transport.pop_pending_payload()
+        if wrapper is None:
+            self.report({'ERROR'}, tr("No pending encrypted data"))
+            return {'CANCELLED'}
+        password = self.password or context.window_manager.aurora_decrypt_password
+        if not password:
+            self.report({'ERROR'}, tr("Please enter the decrypt password"))
+            return {'CANCELLED'}
+        try:
+            text = transport.decrypt_text(wrapper, password)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        result_set, msg = _paste_text(context, text)
+        if msg[1]:
+            self.report(msg[0], msg[1])
+        if transport.receiver_token() is not None:
+            transport.set_receiver_phase(None)
+            transport.clear_receiver_token()
+            for area in context.screen.areas:
+                area.tag_redraw()
+        return result_set
 
-        self.report({'INFO'}, f"Pasted pattern: {pattern_name}")
+
+def _fmt_size(size):
+    return f"{size / 1024.0:.1f} KB" if size >= 1024 else f"{size} B"
+
+
+class NODE_OT_export_logs(bpy.types.Operator):
+    """Export selected session log files into a single archive file."""
+    bl_idname = "node.export_logs_v2"
+    bl_label = "Export Logs"
+    bl_description = "Select the log files to export into a single archive file"
+    bl_options = {'REGISTER'}
+
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH')
+
+    def invoke(self, context, event):
+        wm = context.window_manager
+        wm.aurora_log_entries.clear()
+        for name, path, size, _mtime, entries in logger.list_logs():
+            item = wm.aurora_log_entries.add()
+            item.name = name
+            item.path = path
+            item.file_size = size
+            item.entry_count = entries
+            item.enabled = True
+        if not wm.aurora_log_entries:
+            self.report({'INFO'}, tr("No log files found"))
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        entries = wm.aurora_log_entries
+        if not entries:
+            layout.label(text=tr("No log files found"), icon='INFO')
+            return
+        for item in entries:
+            row = layout.row(align=True)
+            row.prop(item, "enabled", text="")
+            row.label(text="{} · {} {} · {}".format(
+                item.name, item.entry_count, tr("entries"), _fmt_size(item.file_size)))
+
+    def execute(self, context):
+        wm = context.window_manager
+        selected = [item.path for item in wm.aurora_log_entries if item.enabled]
+        if not selected:
+            self.report({'WARNING'}, tr("No logs selected"))
+            return {'CANCELLED'}
+        if not self.filepath:
+            context.window_manager.fileselect_add(self)
+            return {'RUNNING_MODAL'}
+        try:
+            target = logger.export_logs(selected, self.filepath)
+        except Exception as e:
+            self.report({'ERROR'}, "{}: {}".format(tr("Export failed"), e))
+            return {'CANCELLED'}
+        self.report({'INFO'}, tr("Exported {} logs to {}").format(len(selected), target))
+        return {'FINISHED'}
+
+
+class NODE_OT_clear_logs(bpy.types.Operator):
+    """Delete all stored session log files."""
+    bl_idname = "node.clear_logs_v2"
+    bl_label = "Clear Logs"
+    bl_description = "Delete all stored log files"
+    bl_options = {'REGISTER'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        deleted = logger.clear_logs()
+        if not deleted:
+            self.report({'INFO'}, tr("No log files to clear"))
+            return {'CANCELLED'}
+        self.report({'INFO'}, tr("Cleared {} log file(s)").format(len(deleted)))
         return {'FINISHED'}
 
 
@@ -1121,17 +1812,36 @@ classes = [
     NODE_OT_migrate_patterns,
     NODE_OT_export_pattern,
     NODE_OT_import_pattern,
+    NODE_OT_import_resources_keep,
+    NODE_OT_import_resources_unexpected,
+    NODE_OT_import_resources_confirm,
     NODE_OT_copy_pattern,
     NODE_OT_paste_pattern,
+    NODE_OT_copy_shard,
+    NODE_OT_reset_shard_session,
+    NODE_OT_reset_receiver_session,
+    NODE_OT_paste_next_shard,
+    NODE_OT_decrypt_paste,
     NODE_OT_inspect_node_rna,
+    NODE_OT_export_logs,
+    NODE_OT_clear_logs,
 ]
+
+classes = [logger.safe_operator(cls) for cls in classes]
 
 
 def register():
     for cls in classes:
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
         bpy.utils.register_class(cls)
 
 
 def unregister():
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

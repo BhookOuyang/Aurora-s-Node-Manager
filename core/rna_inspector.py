@@ -1,11 +1,17 @@
 """RNA-based property discovery and serialization engine."""
+
 import bpy
 import mathutils
 from typing import Dict, Any, List, Optional, Set, Tuple
 from collections import OrderedDict
 
+from ..compat.blender_compat import f32_short
+from ..utils import logger
+
+
 class RNAInspector:
     """Industrial-grade RNA property inspector with dependency-aware ordering."""
+
     
     # Fixed blacklist: Blender core internal properties (~30 items), stable across versions
     BLACKLIST: Set[str] = {
@@ -152,7 +158,7 @@ class RNAInspector:
     }
     
     @classmethod
-    def discover_properties(cls, node: bpy.types.Node) -> OrderedDict:
+    def discover_properties(cls, node: bpy.types.Node, only_modified: bool = False) -> OrderedDict:
         """
         Discover all serializable RNA properties for a node.
         Returns OrderedDict preserving dependency-aware order.
@@ -176,7 +182,7 @@ class RNAInspector:
             if prop.is_readonly:
                 continue
                 
-            prop_info = cls._inspect_property(node, prop_id, prop)
+            prop_info = cls._inspect_property(node, prop_id, prop, only_modified=only_modified)
             if prop_info:
                 prop_infos.append((prop_id, prop_info))
         
@@ -195,7 +201,7 @@ class RNAInspector:
     
     @classmethod
     def _inspect_property(cls, node: bpy.types.Node, prop_id: str, 
-                          prop: bpy.types.Property) -> Optional[Dict[str, Any]]:
+                          prop: bpy.types.Property, only_modified: bool = False) -> Optional[Dict[str, Any]]:
         """Inspect a single RNA property and return serializable info."""
         
         prop_type = prop.type  # 'BOOLEAN', 'INT', 'FLOAT', 'STRING', 'ENUM', 'POINTER', 'COLLECTION'
@@ -203,8 +209,17 @@ class RNAInspector:
         try:
             value = getattr(node, prop_id)
         except (AttributeError, RuntimeError) as e:
-            print(f"[WARN] Cannot read {node.bl_idname}.{prop_id}: {e}")
+            logger.warning(f"Cannot read {node.bl_idname}.{prop_id}: {e}")
             return None
+        
+        # If only_modified is True, skip properties that equal their default value
+        if only_modified:
+            try:
+                default_value = getattr(prop, 'default', None)
+                if value == default_value:
+                    return None
+            except Exception:
+                pass
         
         if value is None and prop_type != 'POINTER':
             return None
@@ -215,7 +230,7 @@ class RNAInspector:
             
         # Handle POINTER
         if prop_type == 'POINTER':
-            return cls._serialize_pointer(node, prop_id, value)
+            return cls._serialize_pointer(node, prop_id, value, only_modified=only_modified)
             
         # Handle ENUM
         if prop_type == 'ENUM':
@@ -262,7 +277,7 @@ class RNAInspector:
             return {"type": "matrix", "value": [list(row) for row in value]}
 
         # Unknown type - attempt generic serialization
-        print(f"[WARN] Unknown property type {prop_type} for {node.bl_idname}.{prop_id}")
+        logger.warning(f"Unknown property type {prop_type} for {node.bl_idname}.{prop_id}")
         try:
             return {"type": "unknown", "value": str(value)}
         except:
@@ -288,7 +303,7 @@ class RNAInspector:
     
     @classmethod
     def _serialize_pointer(cls, node: bpy.types.Node, prop_id: str,
-                           value: Any) -> Optional[Dict[str, Any]]:
+                           value: Any, only_modified: bool = False) -> Optional[Dict[str, Any]]:
         """Serialize POINTER property."""
         if value is None:
             return None
@@ -335,7 +350,7 @@ class RNAInspector:
                     sub_prop = value.bl_rna.properties[sub_prop_id]
                     if sub_prop.is_readonly:
                         continue
-                    sub_info = cls._inspect_property(value, sub_prop_id, sub_prop)
+                    sub_info = cls._inspect_property(value, sub_prop_id, sub_prop, only_modified=only_modified)
                     if sub_info:
                         generic_props[sub_prop_id] = sub_info
                 if generic_props:
@@ -345,7 +360,7 @@ class RNAInspector:
                         "class_name": value.__class__.__name__,
                     }
         except Exception as e:
-            print(f"[WARN] Generic pointer serialization failed for {node.bl_idname}.{prop_id}: {e}")
+            logger.warning(f"Generic pointer serialization failed for {node.bl_idname}.{prop_id}: {e}")
         
         return None
     
@@ -435,7 +450,7 @@ class RNAInspector:
         """Apply a single property with full error handling and downgrade support."""
         
         if not hasattr(node, prop_id):
-            print(f"[WARN] Node {node.bl_idname} missing property: {prop_id}")
+            logger.warning(f"Node {node.bl_idname} missing property: {prop_id}")
             return
             
         prop_type = prop_info.get("type", "string")
@@ -493,13 +508,13 @@ class RNAInspector:
                 # Handled above
                 pass
             elif prop_type == "unknown":
-                print(f"[WARN] Skipping unknown type property {node.bl_idname}.{prop_id}")
+                logger.warning(f"Skipping unknown type property {node.bl_idname}.{prop_id}")
             else:
                 # Generic fallback
                 setattr(node, prop_id, value)
                 
         except Exception as e:
-            print(f"[ERROR] Failed to set {node.bl_idname}.{prop_id}: {e}")
+            logger.error(f"Failed to set {node.bl_idname}.{prop_id}: {e}")
     
     @classmethod
     def _apply_enum(cls, node: bpy.types.Node, prop_id: str, prop_info: Dict[str, Any]) -> None:
@@ -517,7 +532,7 @@ class RNAInspector:
             try:
                 setattr(node, prop_id, target_value)
             except Exception as e:
-                print(f"[WARN] Direct enum set failed for {node.bl_idname}.{prop_id}: {e}")
+                logger.warning(f"Direct enum set failed for {node.bl_idname}.{prop_id}: {e}")
             return
         
         current_items = [item.identifier for item in current_prop.enum_items]
@@ -527,16 +542,16 @@ class RNAInspector:
             return
         
         # Downgrade handling: value no longer exists in current version
-        print(f"[WARN] Enum value '{target_value}' not found in {node.bl_idname}.{prop_id}")
-        print(f"  Available: {current_items}")
-        print(f"  Saved options: {saved_items}")
+        logger.warning(f"Enum value '{target_value}' not found in {node.bl_idname}.{prop_id}")
+        logger.warning(f"  Available: {current_items}")
+        logger.warning(f"  Saved options: {saved_items}")
         
         # Strategy 1: Case-insensitive exact match
         target_upper = target_value.upper()
         for item in current_items:
             if item.upper() == target_upper:
                 setattr(node, prop_id, item)
-                print(f"  -> Mapped to {item} (case-insensitive match)")
+                logger.info(f"  -> Mapped to {item} (case-insensitive match)")
                 return
         
         # Strategy 2: Substring match (saved item contained in current, or vice versa)
@@ -545,14 +560,14 @@ class RNAInspector:
             for item in current_items:
                 if saved_upper in item.upper() or item.upper() in saved_upper:
                     setattr(node, prop_id, item)
-                    print(f"  -> Mapped to {item} (substring match from {saved})")
+                    logger.info(f"  -> Mapped to {item} (substring match from {saved})")
                     return
         
         # Strategy 3: Use first available as default
         if current_items:
             default = current_items[0]
             setattr(node, prop_id, default)
-            print(f"  -> Fallback to default {default}")
+            logger.info(f"  -> Fallback to default {default}")
     
     @classmethod
     def _apply_id_reference(cls, node: bpy.types.Node, prop_id: str,
@@ -582,14 +597,14 @@ class RNAInspector:
         
         collection_getter = data_collections.get(id_type)
         if not collection_getter:
-            print(f"[WARN] Unknown ID type {id_type} for {node.bl_idname}.{prop_id}")
+            logger.warning(f"Unknown ID type {id_type} for {node.bl_idname}.{prop_id}")
             return
             
         collection = collection_getter()
         if value_name in collection:
             setattr(node, prop_id, collection[value_name])
         else:
-            print(f"[WARN] Could not find {id_type} '{value_name}' for {node.bl_idname}.{prop_id}")
+            logger.warning(f"Could not find {id_type} '{value_name}' for {node.bl_idname}.{prop_id}")
     
     @classmethod
     def _apply_color_ramp(cls, node: bpy.types.Node, prop_id: str,
@@ -609,14 +624,14 @@ class RNAInspector:
             try:
                 ramp.interpolation = ramp_data["interpolation"]
             except Exception as e:
-                print(f"[WARN] Failed to set color ramp interpolation: {e}")
+                logger.warning(f"Failed to set color ramp interpolation: {e}")
         
         # Set color mode if available
         if "color_mode" in ramp_data and hasattr(ramp, 'color_mode'):
             try:
                 ramp.color_mode = ramp_data["color_mode"]
             except Exception as e:
-                print(f"[WARN] Failed to set color mode: {e}")
+                logger.warning(f"Failed to set color mode: {e}")
         
         # Adjust element count
         elements_data = ramp_data.get("elements", [])
@@ -671,7 +686,7 @@ class RNAInspector:
                     else:
                         setattr(mapping, attr, curve_data[attr])
                 except Exception as e:
-                    print(f"[WARN] Failed to set curve mapping {attr}: {e}")
+                    logger.warning(f"Failed to set curve mapping {attr}: {e}")
         
         mapping.update()
     
@@ -700,7 +715,7 @@ class RNAInspector:
         
         # Zone internal trees are auto-created, just verify
         if hasattr(node, 'zone') and node.zone:
-            print(f"[INFO] Zone node {node.name} has internal tree: {node.zone.name}")
+            logger.info(f"Zone node {node.name} has internal tree: {node.zone.name}")
     
     @classmethod
     def _apply_generic_pointer(cls, node: bpy.types.Node, prop_id: str,

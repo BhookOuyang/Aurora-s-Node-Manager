@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 BhookOuyang <https://github.com/BhookOuyang>
+
 """Core deserialization engine - RNA-based v3.0 with index-priority socket matching."""
 import bpy
 from typing import List, Dict, Any, Optional, Tuple
@@ -8,6 +11,7 @@ from ..compat.node_mappings import resolve_node_type, get_cross_type_mapping
 from .topology import NodeTopology
 from .rna_inspector import RNAInspector
 from .zone_handler import ZoneHandler
+from ..utils import logger
 
 
 class PatternDeserializer:
@@ -33,17 +37,17 @@ class PatternDeserializer:
 
         format_version = data.get("format_version", "1.0.0")
         if format_version == "1.0.0":
-            print("[WARN] Loading legacy v1.0 pattern, applying compatibility mode")
+            logger.warning("Loading legacy v1.0 pattern, applying compatibility mode")
         elif format_version == "2.0.0":
-            print("[INFO] Loading v2.0 pattern, RNA properties will use fallback mode")
-        elif format_version != "3.0.0":
-            print(f"[WARN] Loading pattern with format version {format_version}, current is 3.0.0")
+            pass  # current format
+        elif format_version != "2.0.0":
+            logger.warning(f"Loading pattern with format version {format_version}, current is 2.0.0")
 
         pattern_tree_type = data.get("meta", {}).get("node_tree_type", "ShaderNodeTree")
         current_tree_type = node_tree.bl_idname
 
         if pattern_tree_type != current_tree_type:
-            print(f"[INFO] Cross-type load: {pattern_tree_type} -> {current_tree_type}")
+            logger.info(f"Cross-type load: {pattern_tree_type} -> {current_tree_type}")
 
         nodes_data = data.get("nodes", [])
         links_data = data.get("links", [])
@@ -153,7 +157,7 @@ class PatternDeserializer:
             if parent_frame:
                 new_node.parent = parent_frame
         except Exception as e:
-            print(f"[ERROR] Failed to create node {resolved_type}: {e}")
+            logger.error(f"Failed to create node {resolved_type}: {e}")
             if self.skip_unsupported:
                 return None
             try:
@@ -181,8 +185,19 @@ class PatternDeserializer:
 
         # Apply properties using RNAInspector
         properties = node_info.get("properties", {})
+        if new_node.bl_idname == "NodeReroute":
+            sn = properties.get("socket_idname")
+            if isinstance(sn, dict) and sn.get("value") == "NodeSocketVectorEuler":
+                properties = dict(properties)
+                properties["socket_idname"] = dict(sn, value="NodeSocketRotation")
         if properties and "_special" not in properties:
             RNAInspector.apply_properties(new_node, properties)
+
+        # Restore referenced files from absolute paths when the named
+        # datablock is missing (runs only for pattern data that carried paths).
+        special = node_info.get("special", {})
+        if special.get("file_paths"):
+            self._restore_file_paths(new_node, special.get("file_paths"))
 
         # Set input defaults (supports both list and dict formats)
         inputs_data = node_info.get("inputs", [])
@@ -233,7 +248,7 @@ class PatternDeserializer:
                         name=item_data.get("name", "Attribute"),
                     )
                 except Exception as e:
-                    print(f"[WARN] Failed to restore capture item on {new_node.bl_idname}: {e}")
+                    logger.warning(f"Failed to restore capture item on {new_node.bl_idname}: {e}")
 
         # Restore output socket default values
         for socket_data in node_info.get("outputs", []):
@@ -243,6 +258,66 @@ class PatternDeserializer:
                     set_socket_value_safe(socket, socket_data["default_value"], source_file=self._source_path or self._base_name or "", on_warning=self.on_warning)
 
         return new_node
+
+    def _restore_file_paths(self, node: bpy.types.Node, file_paths: Dict[str, Any]) -> None:
+        """Restore referenced files from absolute paths.
+
+        Called only when the named datablock lookup already failed (or the
+        path was stored), so it acts as a fallback that loads the file into
+        bpy.data and assigns it to the node attribute.
+        """
+        import os
+
+        # attr -> (node attr name, data collection, "load" fn)
+        _loaders = {}
+
+        try:
+            _loaders['image'] = bpy.data.images.load
+        except Exception:
+            pass
+        try:
+            _loaders['clip'] = bpy.data.movieclips.load
+        except Exception:
+            pass
+        try:
+            _loaders['sound'] = bpy.data.sounds.load
+        except Exception:
+            pass
+        try:
+            _loaders['script'] = bpy.data.texts.load
+        except Exception:
+            pass
+
+        def _assign_load(attr, path):
+            loader = _loaders.get(attr)
+            if not loader:
+                return False
+            try:
+                if getattr(node, attr, None) is not None:
+                    return True
+                if not os.path.exists(path):
+                    logger.warning(f"Reference file not found: {path}")
+                    return False
+                data = loader(path)
+                setattr(node, attr, data)
+                logger.info(f"Restored {node.bl_idname}.{attr} from {path}")
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to load {attr} from {path}: {e}")
+                return False
+
+        for attr, path in (file_paths or {}).items():
+            if not path:
+                continue
+            if attr == 'filepath':
+                # Direct string property (script / IES external mode)
+                try:
+                    if hasattr(node, 'filepath') and os.path.exists(path):
+                        node.filepath = path
+                except Exception as e:
+                    logger.warning(f"Failed to set {node.bl_idname}.filepath: {e}")
+                continue
+            _assign_load(attr, path)
 
     def _find_socket(self, node: bpy.types.Node, socket_data: Dict[str, Any],
                      is_input: bool) -> Optional[bpy.types.NodeSocket]:
@@ -308,20 +383,20 @@ class PatternDeserializer:
         if from_socket and to_socket:
             try:
                 node_tree.links.new(from_socket, to_socket)
-                print(f"[DEBUG_LINK] OK {from_node.name}.{from_socket.name} -> {to_node.name}.{to_socket.name}")
+                logger.info(f"OK {from_node.name}.{from_socket.name} -> {to_node.name}.{to_socket.name}")
             except Exception as e:
-                print(f"[ERROR] Failed to create link: {e}")
+                logger.error(f"Failed to create link {from_node.name}.{from_socket.name} -> {to_node.name}.{to_socket.name}: {e}", exc=e)
         else:
             if not from_socket:
-                print(f"[WARN] Could not find output socket {from_socket_data} on {from_node.bl_idname} (node={from_node.name})")
-                print(f"[WARN]   Available outputs on {from_node.name}:")
+                logger.warning(f"Could not find output socket {from_socket_data} on {from_node.bl_idname} (node={from_node.name})")
+                logger.warning(f"  Available outputs on {from_node.name}:")
                 for i, s in enumerate(from_node.outputs):
-                    print(f"[WARN]     [{i}] id={s.identifier} name={s.name} type={s.bl_idname}")
+                    logger.warning(f"  [{i}] id={s.identifier} name={s.name} type={s.bl_idname}")
             if not to_socket:
-                print(f"[WARN] Could not find input socket {to_socket_data} on {to_node.bl_idname} (node={to_node.name})")
-                print(f"[WARN]   Available inputs on {to_node.name}:")
+                logger.warning(f"Could not find input socket {to_socket_data} on {to_node.bl_idname} (node={to_node.name})")
+                logger.warning(f"  Available inputs on {to_node.name}:")
                 for i, s in enumerate(to_node.inputs):
-                    print(f"[WARN]     [{i}] id={s.identifier} name={s.name} type={s.bl_idname}")
+                    logger.warning(f"  [{i}] id={s.identifier} name={s.name} type={s.bl_idname}")
 
     def _setup_interface(self, interface_data: Dict[str, Any], node_tree: bpy.types.NodeTree) -> None:
         """Setup node group interface with index-aware ordering."""
@@ -372,7 +447,7 @@ class PatternDeserializer:
                         item.default_attribute_name = inp["default_attribute_name"]
 
                 except Exception as e:
-                    print(f"[ERROR] Failed to create input socket: {e}")
+                    logger.error(f"Failed to create input socket: {e}")
 
             for out in outputs_sorted:
                 socket_type = out.get("type", "NodeSocketFloat")
@@ -390,7 +465,7 @@ class PatternDeserializer:
                         item.subtype = out["subtype"]
 
                 except Exception as e:
-                    print(f"[ERROR] Failed to create output socket: {e}")
+                    logger.error(f"Failed to create output socket: {e}")
 
         elif hasattr(node_tree, 'inputs') and hasattr(node_tree, 'outputs'):
             for inp in interface_data.get("inputs", []):
@@ -400,14 +475,14 @@ class PatternDeserializer:
                     if "default_value" in inp:
                         set_socket_value_safe(new_input, inp["default_value"])
                 except Exception as e:
-                    print(f"[ERROR] Failed to create input: {e}")
+                    logger.error(f"Failed to create input: {e}")
 
             for out in interface_data.get("outputs", []):
                 socket_type = map_socket_type(out.get("type", "NodeSocketFloat"))
                 try:
                     node_tree.outputs.new(socket_type, out.get("name", "Output"))
                 except Exception as e:
-                    print(f"[ERROR] Failed to create output: {e}")
+                    logger.error(f"Failed to create output: {e}")
 
     def _setup_node_group(self, node: bpy.types.Node, group_info: Dict[str, Any],
                           parent_tree: bpy.types.NodeTree) -> None:
@@ -460,6 +535,6 @@ class PatternDeserializer:
                         _apply_inputs(node)
                         return
                     except Exception as e:
-                        print(f"[ERROR] Failed to load node group from file: {e}")
+                        logger.error(f"Failed to load node group from file: {e}")
 
         _apply_inputs(node)
